@@ -1,0 +1,77 @@
+services:
+  api:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      APP_NAME: ${APP_NAME:-AI Pull Request Review Agent}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+asyncpg://review_agent:review_agent@postgres:5432/review_agent
+      REDIS_URL: redis://redis:6379/0
+      HEALTH_CHECK_TIMEOUT_SECONDS: ${HEALTH_CHECK_TIMEOUT_SECONDS:-3}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      GITHUB_API_BASE_URL: ${GITHUB_API_BASE_URL:-https://api.github.com}
+      GITHUB_API_VERSION: ${GITHUB_API_VERSION:-2026-03-10}
+      GITHUB_REQUEST_TIMEOUT_SECONDS: ${GITHUB_REQUEST_TIMEOUT_SECONDS:-15}
+      GITHUB_MAX_ATTEMPTS: ${GITHUB_MAX_ATTEMPTS:-3}
+      GITHUB_MAX_FILE_BYTES: ${GITHUB_MAX_FILE_BYTES:-1000000}
+      MAX_WEBHOOK_BODY_BYTES: ${MAX_WEBHOOK_BODY_BYTES:-2000000}
+      WEBHOOK_ENQUEUE_TIMEOUT_SECONDS: ${WEBHOOK_ENQUEUE_TIMEOUT_SECONDS:-3}
+      REVIEW_JOB_TTL_SECONDS: ${REVIEW_JOB_TTL_SECONDS:-86400}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MOCK_MODE: ${LLM_MOCK_MODE:-true}
+      LLM_OUTPUT_MODE: ${LLM_OUTPUT_MODE:-json_schema}
+      LLM_REQUEST_TIMEOUT_SECONDS: ${LLM_REQUEST_TIMEOUT_SECONDS:-30}
+      LLM_MAX_ATTEMPTS: ${LLM_MAX_ATTEMPTS:-3}
+      LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-2048}
+      LLM_TOKEN_LIMIT_FIELD: ${LLM_TOKEN_LIMIT_FIELD:-max_completion_tokens}
+      MAX_FILES_PER_REVIEW: ${MAX_FILES_PER_REVIEW:-30}
+      MAX_PATCH_CHARS: ${MAX_PATCH_CHARS:-60000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=35).close()"]
+      interval: 10s
+      timeout: 36s
+      retries: 3
+      start_period: 10s
+
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg17-bookworm
+    environment:
+      POSTGRES_USER: review_agent
+      POSTGRES_PASSWORD: review_agent
+      POSTGRES_DB: review_agent
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/001-vector.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U review_agent -d review_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:
+  redis_data:

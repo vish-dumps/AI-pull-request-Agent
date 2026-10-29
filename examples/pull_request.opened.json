@@ -1,0 +1,29 @@
+{
+  "action": "opened",
+  "number": 42,
+  "repository": {
+    "id": 123,
+    "full_name": "octocat/Hello-World",
+    "private": false,
+    "default_branch": "main"
+  },
+  "pull_request": {
+    "number": 42,
+    "title": "Validate user names",
+    "body": "Reject empty user names and cover the failure path.",
+    "user": {"login": "contributor"},
+    "base": {
+      "ref": "main",
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": {"full_name": "octocat/Hello-World"}
+    },
+    "head": {
+      "ref": "validate-user-names",
+      "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "repo": {"full_name": "contributor/Hello-World"}
+    },
+    "additions": 8,
+    "deletions": 1,
+    "changed_files": 2
+  }
+}

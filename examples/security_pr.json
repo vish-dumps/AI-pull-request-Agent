@@ -1,0 +1,26 @@
+{
+  "repository": "demo/security-review",
+  "pr_number": 1,
+  "title": "Demo: look up a user by name",
+  "description": "Synthetic fixture for the Security Agent. No repository code is executed.",
+  "author": "demo-contributor",
+  "base_branch": "main",
+  "head_branch": "demo-user-lookup",
+  "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "head_repository": "demo/security-review",
+  "changed_files": [
+    {
+      "filename": "src/users.py",
+      "status": "modified",
+      "patch": "@@ -1,2 +1,3 @@\n def find_user(connection, username):\n-    return connection.execute(\"SELECT * FROM users WHERE name = ?\", (username,))\n+    query = f\"SELECT * FROM users WHERE name = '{username}'\"\n+    return connection.execute(query)",
+      "additions": 2,
+      "deletions": 1
+    }
+  ],
+  "total_additions": 2,
+  "total_deletions": 1,
+  "total_changed_files": 1,
+  "files_truncated": false,
+  "warnings": []
+}
