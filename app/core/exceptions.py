@@ -24,3 +24,15 @@ class ReviewStateError(Exception):
 
 class LLMProviderError(Exception):
     """A controlled provider failure; messages exclude raw requests and responses."""
+
+
+class WorkflowConflictError(Exception):
+    """A checkpoint thread was reused with incompatible input or configuration."""
+
+
+class WorkflowPersistenceError(Exception):
+    """A database node failed; its checkpoint can be inspected and resumed."""
+
+
+class WorkflowTransientError(WorkflowPersistenceError):
+    """A temporary database failure eligible for a bounded node retry."""

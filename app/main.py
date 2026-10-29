@@ -42,7 +42,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application = FastAPI(
         title=settings.app_name,
         version="0.1.0",
-        description="AI pull request review agent. Phase 4: structured security reviews.",
+        description="AI pull request review agent. Phase 5: checkpointed LangGraph workflow.",
         lifespan=lifespan,
     )
     application.include_router(health_router)

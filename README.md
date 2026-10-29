@@ -4,12 +4,13 @@ An automated GitHub pull request reviewer being built incrementally with FastAPI
 LangGraph, specialized AI agents, PostgreSQL/PGVector, and Redis. The goal is a small,
 understandable portfolio project with a working demo and defensible engineering choices.
 
-**Current implementation: Phase 4 — Security Agent.** A specialized security prompt,
-provider abstraction, validated structured output, one output-repair attempt, and
-deterministic mock mode now connect normalized PR context to a stored security-only
-review. Signed webhooks, Redis acceptance, Alembic persistence, and read APIs remain
-available. LangGraph, other reviewers, automatic queue processing, and indexing
-arrive in later phases.
+**Current implementation: Phase 5 — checkpointed LangGraph workflow.** Five typed
+graph stages connect ingestion, bounded diff context, the Security Agent,
+deterministic aggregation, and replay-safe persistence. Standalone demos use
+in-memory checkpoints; persisted workflows use PostgreSQL checkpoints and can
+resume in another process. Signed webhooks, Redis acceptance, Alembic persistence,
+and read APIs remain available. Other reviewers, automatic queue processing,
+semantic retrieval, and GitHub publishing arrive in later phases.
 The original requirements are preserved in [docs/PRD.md](docs/PRD.md).
 
 ## Architecture
@@ -53,20 +54,28 @@ transaction, and reads the result through FastAPI. The synthetic demo below
 exercises this path. Webhook acceptance still only writes to Redis; accepted jobs
 do not appear in PostgreSQL or the review API until an ingestion caller persists them.
 
-The Phase 4 command is one such caller. It accepts normalized PR JSON, runs the
+The manual commands are such callers. They accept normalized PR JSON, run the
 Security Agent through the configured provider, and can persist the outcome for
 the existing read API. This is a manually invoked single-agent path; it does not
 consume webhook jobs or publish to GitHub.
 
 ```mermaid
 flowchart LR
-    Context[Normalized PR JSON] --> Bound[Bound input / security prompt]
-    Bound --> Provider[Mock or compatible LLM provider]
-    Provider --> Validate[Pydantic + diff citation checks]
-    Validate --> Result[Typed security result or recorded failure]
-    Result --> Persist[Optional transaction: persist partial review]
-    Persist --> Read[Existing review API]
+    Source[Normalized PR JSON / GitHub service] --> Ingest[1. Ingest]
+    Ingest --> Context[2. Prepare diff context]
+    Context --> Security[3. Security Agent]
+    Security --> Aggregate[4. Deduplicate / deterministic risk]
+    Aggregate --> Persist[5. Persist outcome]
+    Persist --> Read[Review API]
+    Ingest -. checkpoints .-> Checkpoints[(Memory / PostgreSQL)]
+    Security -. checkpoints .-> Checkpoints
+    Persist -. checkpoints .-> Checkpoints
 ```
+
+Only the Security Agent runs in Phase 5. Context preparation reports `diff_only`;
+PGVector retrieval remains Phase 7. The final node persists a result; publishing
+to GitHub remains Phase 9. See [the workflow guide](docs/WORKFLOW.md) for state,
+failure, transaction, and recovery details.
 
 Planned review flow, **not implemented yet**:
 
@@ -110,11 +119,16 @@ app/
   schemas/review.py       # Findings, completion contracts, enums, API responses
   schemas/agents.py       # Security output and agent/run results
   agents/security_agent.py # Validation, one repair, evidence checks, bounded input
+  graph/state.py          # JSON-only shared state, reducers, safe result report
+  graph/nodes.py          # Five node implementations and transaction boundaries
+  graph/workflow.py       # Graph edges, bounded retries, start/resume/report
+  graph/checkpoints.py    # Strict PostgreSQL checkpointer lifecycle
   prompts/security.py     # Security-only responsibilities and evidence instructions
   services/github_service.py # GitHub reads, pagination, retries, comment API
   services/job_queue.py   # Atomic delivery deduplication and enqueue
   services/llm_service.py # Provider protocol, compatible HTTP adapter, mock provider
   services/review_service.py # Single-agent persistence and deterministic risk
+  services/aggregation_service.py # Lightweight deduplication and confidence-weighted risk
 docker/postgres/init.sql  # Enable vector in a fresh database
 examples/pull_request.opened.json # Sample webhook, with fictional commit SHAs
 examples/security_pr.json # Synthetic normalized security-review fixture
@@ -122,6 +136,7 @@ scripts/send_webhook.py   # Signed local webhook demo
 scripts/fetch_pr.py       # Read a real PR as normalized JSON
 scripts/seed_demo.py      # Persist a labeled synthetic review without an LLM
 scripts/review_security.py # Run the Security Agent, optionally persist its result
+scripts/review_workflow.py # Run, pause, or resume the checkpointed workflow
 alembic/                  # Async migration environment and versioned schema
 alembic.ini
 tests/
@@ -505,8 +520,56 @@ not the future multi-agent aggregator; deduplication and all-agent scoring come 
 Ingestion commits before model I/O. The agent runs with no open database
 transaction, and completion/findings or failure persist in a separate transaction.
 Raw agent evidence stays in the returned agent result; the database stores the
-existing common finding fields. A hard process crash can still leave `PROCESSING`
-until the future worker implements recovery.
+existing common finding fields. The Phase 4 persistence service now delegates to
+the shared five-stage graph. Its convenience command uses in-memory checkpoints;
+use the Phase 5 workflow command for durable cross-process recovery.
+
+## Phase 5 LangGraph demo
+
+Run the complete graph locally without infrastructure or credits:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/review_workflow.py --mock
+```
+
+The JSON report shows all five completed stages, deterministic risk/findings, and
+`persisted: false`. In this mode the final node returns the result without writing
+to a database, and checkpoints last only as long as that process.
+
+For a durable pause/resume demo with Compose:
+
+```powershell
+docker compose up --build -d
+docker compose exec api python scripts/review_workflow.py --mock --persist --review-id 00000000-0000-4000-8000-000000000005 --stop-before-persist
+docker compose exec api python scripts/review_workflow.py --mock --persist --resume 00000000-0000-4000-8000-000000000005
+Invoke-RestMethod http://localhost:8000/reviews/00000000-0000-4000-8000-000000000005
+```
+
+The first process stops after aggregation with `paused: true`, `status: PROCESSING`,
+and `pending_nodes: ["persist"]`. The second loads PostgreSQL checkpoints and
+finishes the write without rerunning the checkpointed Security Agent. It returns
+`PARTIAL`, risk score `4.5`, one finding, and `persisted: true`. Here `persisted`
+means the final application result, not the checkpoint itself. Repeating the resume
+returns the stored result with `reused: true`; it does not add another finding.
+Use a fresh UUID when repeating the pause demo as a new review.
+
+For host Python, apply migrations, then replace the `docker compose exec api python`
+prefix with `.\.venv\Scripts\python.exe`. The CLI chooses a selector event loop on
+Windows because the PostgreSQL checkpoint driver's async API requires it.
+The same `--mock` and `--persist` modes must be used when resuming a thread.
+
+Business tables remain under Alembic revision `0001`. The official PostgreSQL
+checkpointer manages its own internal tables in the separate `review_workflow`
+schema, initialized by its `setup()` method. This keeps them outside business
+schema autogeneration. The configured database role must be allowed to create the
+schema and its tables. SQLAlchemy/asyncpg still owns business data; Psycopg 3 is
+used by the official LangGraph checkpointer. No separate database service is added.
+
+This remains a manual workflow. Automated queue consumption and worker leases
+are Phase 8, concurrent specialist agents are Phase 6, and semantic retrieval is
+Phase 7. Checkpoint recovery does not imply exactly-once execution: a node that
+had not completed its checkpoint can run again. One caller per review thread is
+required until worker coordination is implemented.
 
 ## Phase 2 webhook demo
 
@@ -638,9 +701,10 @@ creates a unique `test_<uuid>` schema, applies migrations there, and removes onl
 that schema during cleanup. Existing application tables are not used. PostgreSQL
 also verifies concurrent duplicate ingestion; that specific case is skipped on SQLite.
 
-Phase 4 local verification on Python 3.11.9: **209 passed, 1 skipped** without a
-database server; **243 passed, 1 skipped** with PostgreSQL 18 enabled. The skip is
-the SQLite version of a concurrency case that passes on PostgreSQL. Ruff lint,
+Phase 5 local verification on Python 3.11.9: **230 passed, 2 skipped** without a
+database server; **269 passed, 2 skipped** with PostgreSQL 18 enabled. The skips
+are SQLite versions of concurrency and durable-checkpointer cases that pass on
+PostgreSQL. Ruff lint,
 format checks, and dependency compatibility checks passed.
 A real Uvicorn process served `/docs` and `/openapi.json` with HTTP 200 and
 returned the expected HTTP 503 when connected to unavailable PostgreSQL/Redis
@@ -650,8 +714,9 @@ HTTP 202 on acceptance, one queue entry and the same review ID on redelivery,
 and HTTP 403 for a tampered signature. GitHub calls were mocked during verification.
 Phase 3 also verified `alembic upgrade head`, `alembic check`, repeated seeding,
 and real HTTP review/findings/history reads against a separate temporary local
-PostgreSQL cluster. The resolved Starlette version emits an upstream deprecation warning
-about its HTTPX test-client support; the tests pass. Docker is not installed on
+PostgreSQL cluster. Earlier dependency resolutions emitted a Starlette HTTPX
+warning; the current tested dependency set includes HTTPX2 and no longer emits it.
+Docker is not installed on
 the implementation machine, so container builds and a healthy response against
 real services remain unverified.
 
@@ -663,6 +728,14 @@ HTTP check persisted a mock Security Agent result in PostgreSQL, verified it thr
 the review API, and confirmed repeated IDs reused the stored result. A standalone
 mock CLI check also passed with database/Redis deliberately unavailable. Real LLM
 account/model compatibility remains unverified; no paid LLM calls were made.
+
+Phase 5 tests cover ordered graph transitions, JSON-only state, bounded database
+retries, safe agent failure data, cancellation/resume, input/mode/thread/version
+checks, lightweight deduplication, and replay after commit-before-checkpoint failure.
+A real PostgreSQL checkpointer test closes and recreates both connection and graph
+before resuming. Separate CLI processes also paused/resumed a real PostgreSQL
+checkpoint; live HTTP reads confirmed one stored finding. `alembic check` reported
+no business-schema drift after checkpoint table creation.
 
 For a real infrastructure check, start Compose and verify the healthy response.
 Then stop Redis with `docker compose stop redis`: `/health` should return HTTP 503
@@ -686,8 +759,11 @@ endpoint recovers. PostgreSQL/PGVector should remain `up` during that check.
   trusted URL construction keep failures controlled.
 - **Explicit readiness:** checking the vector extension catches incomplete database
   setup. Health failures do not prevent access to the API documentation.
-- **Small dependency surface:** LangGraph, LLM integrations, and Alembic arrive in
-  the phases that use them. The compatible provider reuses HTTPX; it needs no model
+- **LangGraph:** explicit nodes and typed state expose stage boundaries, failure
+  recovery, and checkpoint reuse. PostgreSQL checkpoints survive process restarts;
+  synchronous checkpoint durability records each completed step before moving on.
+- **Small dependency surface:** dependencies arrive in the phases that use them.
+  The compatible provider reuses HTTPX; it needs no model
   SDK or LangChain wrapper yet. There are no placeholder reviewer implementations.
 - **Probabilistic/deterministic boundary:** model output is validated against a
   schema and the supplied diff; application code determines persisted security risk.
@@ -703,7 +779,8 @@ endpoint recovers. PostgreSQL/PGVector should remain `up` during that check.
    transactional repository methods, and stored-review read APIs.
 4. **Single agent (implemented):** security prompt, provider abstraction, validated output,
    one repair, deterministic mock mode, input limits, and optional persistence.
-5. **LangGraph:** typed shared state, graph nodes, checkpointing.
+5. **LangGraph (implemented):** typed state, five nodes, conditional reuse, bounded
+   database retries, deterministic aggregation, durable checkpoints, and resume.
 6. **Multiple agents:** quality, testing, documentation; concurrent execution and partial results.
 7. **PGVector:** repository indexing, embeddings, similarity retrieval, bounded context.
 8. **Redis processing:** queue, worker, status tracking, temporary cache.
@@ -713,8 +790,8 @@ endpoint recovers. PostgreSQL/PGVector should remain `up` during that check.
 
 ## Limitations and future improvements
 
-Phase 4 runs a manually invoked Security Agent, optionally persisting its partial
-result. It does not process pending webhook jobs automatically. Until the worker
+Phase 5 runs a checkpointed, manually invoked Security Agent workflow, optionally
+persisting its partial result. It does not process pending webhook jobs automatically. Until the worker
 arrives, webhook deliveries accumulate in Redis and require a later ingestion caller
 to create their database records. Redis status and PostgreSQL status are not yet
 synchronized by a worker.
@@ -724,9 +801,8 @@ containers must be verified on a Docker-capable machine. The current credentials
 and configuration target local development. Dependencies use compatible version
 ranges; release deployments should use a pinned dependency resolution.
 
-As the review pipeline is implemented, its documentation will cover LangGraph
-state transitions, agent responsibilities, deterministic
-risk scoring, example output, and benchmark methodology. LLM reviews can produce
+Future documentation will add parallel-agent responsibilities, GitHub output,
+and benchmark methodology. LLM reviews can produce
 false positives, retrieval is approximate, diff-only analysis can miss runtime
 behavior, and large PRs require bounded context. Human review and validation of
 generated suggestions remain necessary.
@@ -743,3 +819,5 @@ Retry handling follows [GitHub's REST best practices](https://docs.github.com/en
 Async database ownership follows [SQLAlchemy's session guidance](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html).
 The migration environment follows [Alembic's async cookbook](https://alembic.sqlalchemy.org/en/latest/cookbook.html#using-asyncio-with-alembic).
 The compatible request schema follows [official OpenAI structured-output documentation](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=chat).
+Checkpoint and resume behavior follows [LangGraph's checkpointer guide](https://docs.langchain.com/oss/python/langgraph/checkpointers).
+The checkpoint connection and setup follow the [official PostgreSQL checkpointer](https://pypi.org/project/langgraph-checkpoint-postgres/).

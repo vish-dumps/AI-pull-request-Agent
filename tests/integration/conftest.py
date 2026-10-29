@@ -63,7 +63,7 @@ def database(request, tmp_path):
     try:
         asyncio.run(initialize())
         yield SimpleNamespace(
-            engine=engine, sessions=build_session_factory(engine), backend=backend
+            engine=engine, sessions=build_session_factory(engine), backend=backend, schema=schema
         )
     finally:
         asyncio.run(cleanup())

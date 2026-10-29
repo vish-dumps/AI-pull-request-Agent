@@ -149,7 +149,8 @@ Implemented:
   command runs without infrastructure or LLM credits; `--persist` uses PostgreSQL.
   `--review-id` supports terminal-result reuse without another model call.
 - Active LLM configuration in `.env.example` and Compose. No database migration
-  was needed. LangGraph and queue consumption remain unimplemented.
+  was needed. At the end of Phase 4, LangGraph and queue consumption were still
+  unimplemented; Phase 5 below adds graph orchestration.
 
 Verification on Python 3.11.9:
 
@@ -181,9 +182,78 @@ consume Redis jobs or synchronize Redis status. Hard-crash recovery for PROCESSI
 records, concurrent worker leases, and rescheduling belong to later workflow/worker
 work. LangGraph orchestration, other agents, and PGVector retrieval have not run.
 
+## Phase 5: checkpointed LangGraph workflow
+
+Implemented:
+
+- `app/graph/state.py`: JSON-only typed shared state, additive error/stage reducers,
+  workflow schema version, and a safe result report. Runtime clients/settings and
+  model credentials never enter checkpoint channels.
+- `app/graph/nodes.py`: ingest, prepare diff context, Security Agent, aggregate,
+  and persist nodes. Ingestion accepts normalized context or fetches it through an
+  injected GitHub service. It verifies queued SHAs before persistence.
+- Context preparation bounds patches and records `context_source=diff_only`, with
+  empty retrieved context. PGVector retrieval remains Phase 7.
+- `app/graph/workflow.py`: sequential edges, terminal-result reuse, synchronous
+  checkpoint durability, bounded DB node retries, start/resume/report, and guards
+  against incompatible input/mode/version/thread reuse.
+- Recorded expected/unexpected agent failures finalize as FAILED with safe errors.
+  Cancellation and failed infrastructure nodes retain resumable progress.
+- `app/graph/checkpoints.py`: official async PostgreSQL saver, strict serializer
+  allowlists, autocommit/dictionary rows, and a dedicated `review_workflow` schema.
+  Library-owned setup/migrations stay separate from Alembic business revision 0001.
+- In-memory checkpoints support infrastructure-free demos/tests. PostgreSQL
+  checkpoints support resuming in another process. The CLI selects a Windows
+  selector loop for Psycopg 3; business persistence remains SQLAlchemy/asyncpg.
+- `services/aggregation_service.py`: shared deterministic risk and lightweight
+  same-file/title/nearby-line deduplication. It still produces security-only PARTIAL
+  reviews. Other specialized agents and parallel execution are Phase 6.
+- The Phase 4 persistence service now delegates to this graph, preserving its
+  existing result contract and eliminating duplicate orchestration code.
+- Finalization recognizes an already committed matching terminal state on replay,
+  preventing duplicate findings after commit-before-checkpoint failure.
+- `scripts/review_workflow.py`: free mock graph run, optional durable persistence,
+  a static debugging pause before persistence, and explicit resume by review UUID.
+- README graph/demo updates and `docs/WORKFLOW.md` state/recovery/transaction guide.
+
+Verified on Python 3.11.9:
+
+- Default suite: 230 passed, 2 skipped.
+- With PostgreSQL 18: 269 passed, 2 skipped. Skips are SQLite variants of concurrency
+  and durable-checkpointer tests; both PostgreSQL counterparts pass.
+- New tests cover stage ordering, JSON-only state, safe agent failure, cancellation,
+  checkpoints and thread/mode/version checks, deduplication, DB retry limits, and
+  ingestion through mocked GitHub. Existing Phase 4 persistence tests still pass.
+- Commit-before-checkpoint failure was simulated: resume kept one finding and did
+  not repeat the completed model call.
+- Actual PostgreSQL saver closed/reopened its connection and rebuilt the graph
+  before resume, without re-running security.
+- Separate CLI processes paused and resumed review
+  `00000000-0000-4000-8000-000000000005`. A repeat resume reused the result.
+  Real Uvicorn HTTP reads returned PARTIAL, risk score 4.5, one finding, HTTP 200.
+- `alembic check` found no business-schema drift after checkpoint table setup.
+- Ruff lint/format and installed dependency compatibility checks passed.
+- The current dependency resolution includes HTTPX2, resolving the earlier
+  upstream Starlette test-client warning. No paid LLM calls/GitHub writes occurred.
+
+Verification uses the separate temporary PostgreSQL cluster under `.venv`, never
+the existing Windows PostgreSQL service. It is stopped after checks. Docker builds
+and real provider account/model behavior remain unverified.
+
+Resume skips successfully checkpointed stages; an unfinished node may run again.
+This is not a distributed exactly-once guarantee. One caller per review thread is
+required. Worker leases, queue consumption/acknowledgement, status synchronization,
+automatic retries across jobs, and checkpoint retention remain later work. This
+phase does not publish GitHub comments or perform semantic retrieval.
+
+Workflow state is currently schema version 1. Review checkpoint compatibility when
+changing topology/state in Phase 6; do not silently reinterpret incompatible saved
+threads. `--resume` preserves the original mock/persistence modes and revision data.
+
 ## Next phase
 
-Phase 5 introduces LangGraph with typed shared state, ingestion/context/security/
-aggregation/persistence nodes, and checkpointing. Reuse normalized PR contracts,
-the provider interface, recorded agent failures, and transaction boundaries.
-Keep GitHub HTTP logic outside agents and processing outside the webhook request.
+Phase 6 adds Quality, Testing, and Documentation Agents with distinct prompts and
+structured outputs, concurrent graph branches, shared findings, and partial-result
+aggregation when one reviewer fails. Preserve controlled provider/output retries,
+safe error data, checkpoint boundaries, and idempotent final persistence. PGVector
+retrieval and Redis worker processing remain Phases 7 and 8.
