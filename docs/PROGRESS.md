@@ -632,7 +632,120 @@ the existing Windows PostgreSQL service was untouched. Docker deployment and
 real-provider/account behavior remain unverified. No coverage percentage or
 benchmark result is inferred from the passing functional suite.
 
-## Next phase
+## Phase 11: operational polish and reproducible demonstrations
 
-Phase 11 remains: consolidate structured logging, retries, large-PR behavior,
-architecture/demo documentation, and simulated-load verification.
+Implemented:
+
+- Context-variable correlation carries review/repository/PR identity into worker
+  I/O, parallel reviewer branches, and provider retries. JSON logs include branch
+  status, attempt counts, elapsed timings, input-budget counts, and PR cache hits.
+  Context resets on failure/cancellation; parallel reviews remain isolated. The
+  formatter retains its structured-field allowlist, and transport/SQL verbose
+  logs are restricted. Existing node/result timing data remains available.
+- Limited PR input now prioritizes security/configuration and source files ahead
+  of tests, docs, and generated artifacts. Oversized patches compact into bounded
+  changed-line windows with neighboring context and accurate unified-diff line
+  numbers. Unfit windows/lines are omitted without blocking smaller later files.
+  Coverage warnings survive checkpoints and make final reviews partial; limited
+  zero-finding results cannot approve. Existing configurable budgets remain active.
+- Audited and documented the existing transport, output-repair, graph transaction,
+  worker, receipt, and publication retry/deadline policies. No additional blanket
+  retry was added around ambiguous writes. Publication recovery remains read-only
+  until an authenticated exact-body match is found.
+- `scripts/demo.py` produces actual complete and limited four-agent mock reports,
+  Markdown previews, and correlated JSON event logs. Checked-in outputs under
+  `examples/demo` demonstrate complete score 7.7/four findings and partial score
+  4.5/one finding. They are explicitly mock, non-persisted, and unpublished.
+- `scripts/simulate_load.py` sends signed in-process ASGI traffic while a worker
+  drains production queue Lua, graph, aggregation, migrated temporary SQLite,
+  context cache, and saved-review APIs. Fakeredis, in-memory checkpoints, a single
+  worker lock substitute, fixture GitHub, and delayed mock models are explicit
+  boundaries. It records actual acceptance/read latency, queue samples, processing
+  rate, counts, errors, environment, and inputs; failures exit nonzero.
+- Recorded 100- and 1,000-delivery simulations in `examples/benchmarks`. The latter
+  accepted 1,000 requests, deduplicated 100, completed 900 unique reviews using
+  3,600 mock model calls, fetched fixture files once, and drained to zero pending
+  and inflight work. Its measured acceptance p95 was 1.455 ms and drain time from
+  submission start 85.458 s. These are single-machine in-process warm-cache
+  measurements, not production/network/provider capacity claims.
+- Added [DEMO.md](DEMO.md) and [OPERATIONS.md](OPERATIONS.md), a benchmark methodology
+  record, quick-start links/features/stack in README, and a primary architecture
+  diagram including PGVector, worker ownership, saving, publishing, and ACK.
+  Generated `artifacts/` output is ignored. The API description is phase-neutral.
+- Added diff-budget/citation, parallel logging, retry correlation, demo artifact,
+  simulated-load, and persisted limited-coverage end-to-end tests. Prior truncation
+  tests now verify omitted evidence against the new changed-window selection.
+
+Verified on Python 3.11.9:
+
+- Default test runner: **483 passed, 12 expected skips**.
+- PostgreSQL 16.15 / PGVector 0.8.6 and Redis 7.4.11:
+  **608 passed, 11 expected skips**, including 44 end-to-end service-matrix cases.
+- Ruff lint and formatting passed (143 Python files); all 72 installed packages
+  are compatible, and Git whitespace checks passed.
+- The demo CLI generated both reports/previews and valid correlated event JSON.
+  Both recorded load commands completed successfully with no failed/partial
+  reviews, empty queues after draining, and no external calls or comment writes.
+- Owned loopback PostgreSQL/Redis were stopped after verification. Existing Windows
+  services and prior application records were not reset or removed.
+
+## Implementation status
+
+All eleven PRD implementation phases are complete. The subsequent Docker milestone
+below verifies local container startup and delivery. Real GitHub authentication/
+publishing, paid model/embedding behavior, and deployment-specific capacity still
+require validation in their target environment. Functional
+tests and mock-load results do not establish semantic accuracy or production
+readiness. Exhaustive large-PR coverage, queue admission/backpressure, managed
+secrets/authentication, pinned release dependencies, and deployment hardening are
+future production work rather than unfinished implementation phases.
+
+## Post-PRD milestone: Docker/Compose deployment validation
+
+The PRD has no Phase 12. After the request to continue, the next milestone addressed
+the remaining Docker validation gap using the newly available local Docker engine.
+
+Implemented:
+
+- `scripts/compose_smoke.py` derives canonical configuration from the actual
+  Compose file and builds the actual application Dockerfile. It uses a random
+  project, private volumes/network, dynamic loopback API/fixture ports, and no
+  database/Redis host mappings. It ignores user application/Compose settings,
+  rejects remote Docker engines, fixed container names, and external resources.
+- `scripts/fixture_github.py` serves only the synthetic PR, actor, files, and
+  in-memory comments. API/worker GitHub traffic stays inside the fixture stack;
+  model responses are explicitly mock. Fixture-only publishing is enabled to
+  exercise the real outgoing comment path without a real account or paid API.
+- Automatic startup migration, healthy readiness, invalid-signature rejection,
+  signed delivery, separate worker processing, stored findings/score, comment
+  preview/publication, redelivery, worker restart, Redis outage/recovery, and
+  durable dedup/status after Redis restart are checked. Container `alembic check`
+  and `pip check` verify migration/dependency consistency.
+- Config, command output, and container logs are saved to ignored `artifacts/`.
+  A first-run Windows Unicode log decoding failure was fixed using explicit UTF-8
+  capture, with live per-command log files. Cleanup runs on success and failure.
+  `.dockerignore` excludes generated artifacts from the build context.
+- Six fixture/isolation/endpoint tests and [DEPLOYMENT.md](DEPLOYMENT.md) document
+  reproduction, resource ownership, evidence, and validation limits. Updated
+  README, testing/operations guides, and saved the actual successful result in
+  `examples/deployment/compose-smoke.json`.
+
+Verified:
+
+- Corrected Docker smoke run passed on Engine 29.9.2 / Compose 5.6.1, Linux
+  containers, Python 3.11.18, PostgreSQL 17.11, and PGVector 0.8.7. Exact resolved
+  library versions are in the saved result; no release lock is implied.
+- One signed review completed with four findings and risk score 7.7, creating
+  exactly one fixture comment. Preview/body matched, repeat deliveries reused the
+  review, worker restart preserved it, and Redis readiness recovered from 503 to
+  200 without losing terminal status or deduplication. No real GitHub/paid API call.
+- Alembic reported no drift and container dependencies had no conflicts.
+- Host default suite: **489 passed, 12 expected skips**. Ruff lint/format, Git
+  whitespace checks, and all 72 installed host-package compatibility checks pass.
+- Both disposable attempts removed their own containers/network/volumes. After
+  the successful run, all project-labeled resource listings were empty. Existing
+  Windows services and other Docker projects were untouched. Build images/cache
+  remain available for later runs.
+
+Real account/provider validation, release dependency locking, CI automation, and
+production deployment hardening remain future milestones.

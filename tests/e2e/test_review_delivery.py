@@ -189,6 +189,7 @@ def accept(client, context):
         ("partial", "PARTIAL", 3, "COMMENT", 5),
         ("repair", "COMPLETED", 4, "REQUEST_CHANGES", 5),
         ("missing_patch", "PARTIAL", 3, "COMMENT", 4),
+        ("limited", "PARTIAL", 1, "REQUEST_CHANGES", 4),
         ("all_failed", "FAILED", 0, None, 8),
         ("stale", "FAILED", 0, None, 0),
     ],
@@ -208,6 +209,8 @@ def test_signed_delivery_to_final_comment(
     client = workflow_client
     review_id, body, signed = accept(client, multi_context)
     fixtures = RemoteFixtures(multi_context, scenario)
+    if scenario == "limited":
+        settings = settings.model_copy(update={"max_files_per_review": 1})
 
     async def run():
         async with delivery_worker(database, settings, queue_backend, fixtures) as (

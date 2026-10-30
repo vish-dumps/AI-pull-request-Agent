@@ -5,6 +5,7 @@ from time import perf_counter
 
 from pydantic import ValidationError
 
+from app.agents.diff_budget import bounded_patch, file_priority
 from app.core.config import Settings
 from app.core.exceptions import LLMProviderError
 from app.schemas.agents import AgentResult, AgentReview
@@ -46,7 +47,14 @@ def prepare_review_input(
     missing_patches = sum(not file.patch for file in context.changed_files)
     if missing_patches:
         warnings.append(f"{missing_patches} changed file(s) have no textual patch.")
-    for changed in context.changed_files:
+    changed_files = context.changed_files
+    if (
+        len(changed_files) > settings.max_files_per_review
+        or sum(len(file.patch or "") for file in changed_files) > remaining
+    ):
+        changed_files = sorted(changed_files, key=lambda file: file_priority(file.filename))
+        warnings.append("Limited input prioritizes security/configuration and source files.")
+    for changed in changed_files:
         if not changed.patch:
             continue
         if len(changed.filename) > 1024:
@@ -57,7 +65,7 @@ def prepare_review_input(
             break
         patch = changed.patch
         if len(patch) > remaining:
-            patch = patch[:remaining].rsplit("\n", 1)[0] if "\n" in patch[:remaining] else ""
+            patch = bounded_patch(patch, remaining)
             warnings.append(f"Patch truncated for {changed.filename}.")
         if patch:
             files.append({"filename": changed.filename, "status": changed.status, "patch": patch})

@@ -45,7 +45,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application = FastAPI(
         title=settings.app_name,
         version="0.1.0",
-        description="AI pull request review agent. Phase 9: guarded GitHub Markdown publishing.",
+        description="Asynchronous multi-agent pull request review with guarded GitHub publishing.",
         lifespan=lifespan,
     )
     application.include_router(health_router)

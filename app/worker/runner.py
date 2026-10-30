@@ -13,6 +13,7 @@ from app.core.exceptions import (
     ReviewConflictError,
     WorkflowConflictError,
 )
+from app.core.logging import log_context
 from app.schemas.publication import PublicationStatus
 from app.schemas.review import ReviewStatus
 from app.services.publication_service import aware
@@ -81,6 +82,15 @@ class ReviewWorker:
         await self.queue.finish(receipt, terminal, error=error, dead=dead)
 
     async def _process(self, receipt: Receipt) -> None:
+        with log_context(
+            review_id=str(receipt.job.review_id),
+            repository=receipt.job.repository,
+            pr_number=receipt.job.pr_number,
+            stage="worker",
+        ):
+            await self._process_owned(receipt)
+
+    async def _process_owned(self, receipt: Receipt) -> None:
         started = perf_counter()
         async with self.processor.lock(receipt.job) as locked:
             if not locked:

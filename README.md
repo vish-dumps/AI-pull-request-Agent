@@ -1,10 +1,10 @@
 # AI Pull Request Review Agent
 
-An automated GitHub pull request reviewer being built incrementally with FastAPI,
+An automated GitHub pull request reviewer built with FastAPI,
 LangGraph, specialized AI agents, PostgreSQL/PGVector, and Redis. The goal is a small,
 understandable portfolio project with a working demo and defensible engineering choices.
 
-**Current implementation: Phase 10 — consolidated automated verification.** Security,
+**Current implementation: Phase 11 complete — operational polish and reproducible demos.** Security,
 Quality, Testing, and Documentation Agents run in parallel between context preparation
 and deterministic aggregation. Failed reviewers preserve successful results as a
 partial review. Optional context retrieval supplies bounded related snippets from
@@ -20,9 +20,82 @@ The test suite now verifies signed deliveries through final comments with mocked
 HTTP services, plus an opt-in PostgreSQL/PGVector and Redis matrix.
 The original requirements are preserved in [docs/PRD.md](docs/PRD.md).
 
+## Try the free demo
+
+After installing the project (`python -m pip install -e ".[dev]"`):
+
+```powershell
+.\.venv\Scripts\python.exe scripts/demo.py
+```
+
+Open `artifacts/demo/review.md` for a complete four-agent fixture review and
+`artifacts/demo/limited.md` for a partial review with explicit coverage limits.
+The command also saves actual JSON workflow reports and correlated stage logs.
+It uses no GitHub token, database server, or paid model. Checked-in previews:
+[complete review](examples/demo/review.md), [limited review](examples/demo/limited.md).
+
+[Demo and load simulation](docs/DEMO.md) · [Testing](docs/TESTING.md) ·
+[Operations and retry policy](docs/OPERATIONS.md) · [Worker recovery](docs/WORKER.md) ·
+[Publishing](docs/PUBLISHING.md)
+
+The follow-on [Docker deployment check](docs/DEPLOYMENT.md) builds and verifies an
+isolated Linux-container stack, including the API, worker, PostgreSQL/PGVector,
+Redis, and fixture-only publishing. Run it with
+`.\.venv\Scripts\python.exe scripts/compose_smoke.py` while Docker is running.
+
+## Features
+
+- Signed webhook acceptance, delivery deduplication, asynchronous Redis jobs,
+  receipt recovery, and temporary revision-scoped PR caching.
+- Parallel Security, Testing, Quality, and Documentation reviewers with schema
+  validation, diff evidence checks, bounded repair, and independent failure handling.
+- Optional exact-base repository context via PGVector, deterministic deduplication
+  and weighted risk, persisted findings, and review/status APIs.
+- Guarded Markdown publication with durable write intent and conservative
+  reconciliation of ambiguous comment writes.
+- Correlated JSON timing logs, prioritized bounded diff selection, complete/partial
+  demo artifacts, and a measured mock-load harness.
+
+## Tech stack
+
+Python 3.11+, FastAPI/Pydantic, HTTPX, LangGraph, SQLAlchemy/Alembic,
+PostgreSQL/PGVector, Redis, and Docker Compose. Pytest, Ruff, SQLite, and fakeredis
+support repeatable local verification. LLM and embedding adapters use configurable
+compatible endpoints; deterministic mock providers make demos free.
+
 ## Architecture
 
-Implemented request flow:
+Primary deployed flow (retrieval and publishing are configurable):
+
+```mermaid
+flowchart TD
+    GitHub[Signed GitHub PR webhook] --> API[FastAPI: verify and accept]
+    API --> Queue[Redis queue, receipts, status]
+    Queue --> Worker[Worker: lease and PostgreSQL review lock]
+    Worker --> Ingest[LangGraph ingest: fetch pinned PR revision]
+    Ingest --> Context[Select bounded diff and optional context]
+    Index[(Exact-base PGVector index)] --> Context
+    Context --> Security[Security]
+    Context --> Testing[Testing]
+    Context --> Quality[Quality]
+    Context --> Documentation[Documentation]
+    Security --> Aggregate[Deduplicate and compute risk]
+    Testing --> Aggregate
+    Quality --> Aggregate
+    Documentation --> Aggregate
+    Aggregate --> Save[(PostgreSQL review and findings)]
+    Save --> Publish[Guarded publication and reconciliation]
+    Publish --> Comment[GitHub Markdown comment]
+    Publish --> Ack[Redis acknowledgement or deferred retry]
+    Reads[Review and preview APIs] --> Save
+```
+
+The webhook returns HTTP 202 before model work. Successful sibling results survive
+individual reviewer failures. Saving analysis precedes optional comment creation
+and queue acknowledgement; crash recovery reuses durable outcomes. See
+[OPERATIONS.md](docs/OPERATIONS.md) for limits, retries, and recovery boundaries.
+
+Dependency readiness:
 
 ```mermaid
 flowchart LR
@@ -91,28 +164,6 @@ All four reviewers run by default. Context preparation reports `diff_only` or
 worker optionally publishes it before acknowledgement. See [the workflow guide](docs/WORKFLOW.md) for state,
 failure, transaction, and recovery details.
 
-Implemented end-to-end flow, with context retrieval and publishing enabled by configuration:
-
-```mermaid
-flowchart TD
-    GitHub[GitHub PR webhook] --> API[FastAPI: verify signature / accept job]
-    API --> Queue[Redis job queue and status]
-    Queue --> Ingest[LangGraph: ingest PR]
-    Ingest --> Context[Retrieve repository context]
-    PGVector[(PostgreSQL + PGVector)] --> Context
-    Context --> Security[Security agent]
-    Context --> Testing[Testing agent]
-    Context --> Quality[Quality agent]
-    Context --> Documentation[Documentation agent]
-    Security --> Aggregate[Deduplicate / deterministic risk scoring]
-    Testing --> Aggregate
-    Quality --> Aggregate
-    Documentation --> Aggregate
-    Aggregate --> Persist[Persist review]
-    Persist --> PGVector
-    Persist --> Publish[Publish GitHub comment]
-```
-
 ## Project structure
 
 ```text
@@ -125,7 +176,7 @@ app/
   api/routes/publications.py # Read-only Markdown preview and publication status
   api/routes/repositories.py # Bounded revision-pinned repository indexing
   core/config.py          # Environment and .env configuration
-  core/logging.py         # JSON application logs
+  core/logging.py         # JSON timing logs with per-review/agent context
   core/security.py        # HMAC-SHA256 signature verification
   core/exceptions.py      # Sanitized GitHub API failures
   db/session.py           # Async SQLAlchemy engine configuration
@@ -165,6 +216,8 @@ scripts/review_security.py # Run the Security Agent, optionally persist its resu
 scripts/review_workflow.py # Run, pause, or resume the checkpointed workflow
 scripts/index_repository.py # Index GitHub source or a normalized source fixture
 scripts/test_suite.py     # Lint, formatting, tests; optional service matrix
+scripts/demo.py           # Complete/limited mock reviews and correlated event artifacts
+scripts/simulate_load.py  # Signed ASGI acceptance, background draining, saved-review reads
 alembic/                  # Async migration environment and versioned schema
 alembic.ini
 tests/
@@ -909,7 +962,10 @@ deadlines, GitHub pagination, retries, rate limits, absent patches, file safety,
 forks, and stale revisions. `httpx.MockTransport` mocks GitHub; `fakeredis[lua]`
 executes the actual enqueue script against in-memory Redis. Database health I/O
 is mocked. No GitHub credentials, real external writes, or LLM credits are required.
-These tests do not claim to validate a real Docker deployment.
+These pytest runs do not validate a Docker deployment. The separate
+[Compose smoke check](docs/DEPLOYMENT.md) has now passed against actual Linux
+containers. Its fixture/isolation helpers bring the default suite to **489 passed,
+12 expected skips**; real GitHub and paid providers remain unverified.
 
 Phase 3 persistence tests apply the actual Alembic migration to an isolated SQLite
 file by default, with foreign keys and transactional savepoints enabled. They
@@ -931,8 +987,8 @@ creates a unique `test_<uuid>` schema, applies migrations there, and removes onl
 that schema during cleanup. Existing application tables are not used. PostgreSQL
 also verifies concurrent duplicate ingestion; that specific case is skipped on SQLite.
 
-Phase 10 local verification on Python 3.11.9: **468 passed, 12 skipped** without
-external services; **590 passed, 11 skipped** with PostgreSQL 16.15 / PGVector 0.8.6
+Phase 11 local verification on Python 3.11.9: **483 passed, 12 skipped** without
+external services; **608 passed, 11 skipped** with PostgreSQL 16.15 / PGVector 0.8.6
 and Redis 7.4.11 enabled. The latter skips are SQLite variants of cases requiring
 PostgreSQL locks/checkpoints/vector operations; their PostgreSQL counterparts pass.
 The default suite additionally skips the real Redis check. Ruff lint,
@@ -1030,6 +1086,9 @@ endpoint recovers. PostgreSQL/PGVector should remain `up` during that check.
 - **LangGraph:** explicit nodes and typed state expose stage boundaries, failure
   recovery, and checkpoint reuse. PostgreSQL checkpoints survive process restarts;
   synchronous checkpoint durability records each completed step before moving on.
+- **Four specialized agents:** separate category prompts keep responsibilities and
+  evidence requirements clear. Parallel execution reduces elapsed review time;
+  independent results preserve useful analysis when one reviewer fails.
 - **Small dependency surface:** dependencies arrive in the phases that use them.
   The compatible provider reuses HTTPX; it needs no model
   SDK or LangChain wrapper yet. There are no placeholder reviewer implementations.
@@ -1059,7 +1118,9 @@ endpoint recovers. PostgreSQL/PGVector should remain `up` during that check.
    durable outgoing intent, revision checks, author/body reconciliation, preview/status APIs.
 10. **Workflow tests (implemented):** shared fixtures, HTTP/configuration isolation,
     signed webhook-to-comment scenarios, service matrix, and a repeatable test runner.
-11. **Polish:** retries, large-PR limits, timings, simulated load script, demo documentation.
+11. **Polish (implemented):** correlated stage/agent/retry logs, prioritized bounded
+    diff windows, documented retry/recovery policy, generated demos, and recorded
+    100/1,000-delivery mock-load simulations. See [DEMO.md](docs/DEMO.md).
 
 ## Limitations and future improvements
 
@@ -1071,13 +1132,17 @@ distributed exactly-once or failover guarantee. Expired Redis display metadata i
 not durable history; completed review reads remain available from PostgreSQL.
 Ambiguous comment writes are reconciled without automatic reposting. A PR can move
 after the final revision check because issue comments have no atomic commit guard.
-Basic input budgets are implemented; chunked review and advanced large-PR handling
-remain future work. Infrastructure
-containers must be verified on a Docker-capable machine. The current credentials
+Prioritized file and changed-window budgets make limited coverage explicit;
+exhaustive chunked review and queue admission/backpressure remain future work.
+Local Linux-container build/startup, migrations, review delivery, fixture publishing,
+and Redis readiness recovery have passed the isolated Compose check. Production
+deployment configuration still requires its own validation. The current credentials
 and configuration target local development. Dependencies use compatible version
 ranges; release deployments should use a pinned dependency resolution.
 
-Phase 11 will complete operational polish, benchmark methodology, and demo material.
+All eleven implementation phases are complete. The measured load results are
+in-process mock simulations, described with their boundaries in
+[the benchmark record](examples/benchmarks/README.md).
 LLM reviews can produce
 false positives, retrieval is approximate, diff-only analysis can miss runtime
 behavior, and large PRs require bounded context. Human review and validation of

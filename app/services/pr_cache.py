@@ -82,6 +82,9 @@ class CachedGitHubService:
             if (current.base.sha, current.head.sha) != (expected_base_sha, expected_head_sha):
                 raise PullRequestChangedError("Queued pull request revision is no longer current")
             if current.changed_files == cached.total_changed_files:
+                logger.info(
+                    "PR context cache lookup", extra={"stage": "pr_cache", "cache_hit": True}
+                )
                 return cached.model_copy(
                     update={
                         "title": current.title,
@@ -94,6 +97,7 @@ class CachedGitHubService:
                         else None,
                     }
                 )
+        logger.info("PR context cache lookup", extra={"stage": "pr_cache", "cache_hit": False})
         context = await self.github.get_pull_request_context(
             repository,
             pr_number,

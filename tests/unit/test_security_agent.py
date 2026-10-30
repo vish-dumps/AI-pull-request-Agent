@@ -141,13 +141,20 @@ def test_input_file_and_total_patch_budgets_are_enforced(settings, security_cont
     assert len(patches) <= 1
     assert sum(map(len, patches.values())) <= 128
     assert warnings
-    assert payload["changed_files"][0]["patch"] == patches["src/users.py"]
+    selected = payload["changed_files"][0]
+    assert selected["patch"] == patches[selected["filename"]]
 
 
 def test_omitted_evidence_cannot_be_cited_after_truncation(
     settings, security_context, security_output
 ):
+    evidence = security_output["findings"][0]["evidence"]
+    security_context.changed_files[0].patch = (
+        "@@ -1,0 +1,40 @@\n" + "+safe = 0\n" * 40 + "@@ -50,0 +50,1 @@\n+" + evidence
+    )
     limited = settings.model_copy(update={"max_patch_chars": 128})
+    _, patches, _ = prepare_security_input(security_context, limited)
+    assert evidence not in patches["src/users.py"]
     provider = provider_returning(security_output)
     result = asyncio.run(SecurityAgent(provider, limited).review(security_context))
     assert result.status == "FAILED"

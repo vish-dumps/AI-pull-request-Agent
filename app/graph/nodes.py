@@ -18,6 +18,7 @@ from app.core.exceptions import (
     WorkflowPersistenceError,
     WorkflowTransientError,
 )
+from app.core.logging import log_context
 from app.db.repositories import ReviewRepository
 from app.graph.state import ReviewState
 from app.schemas.agents import AgentResult
@@ -124,6 +125,19 @@ class ReviewNodes:
         started = perf_counter()
         original = PullRequestContext.model_validate(state["pr_context"])
         _, patches, warnings = prepare_review_input(original, self.agent.settings)
+        logger.info(
+            "Review input budget selected",
+            extra={
+                "review_id": state["review_id"],
+                "repository": original.repository,
+                "pr_number": original.pr_number,
+                "stage": "context",
+                "files_reviewed": len(patches),
+                "files_omitted": max(0, original.total_changed_files - len(patches)),
+                "patch_chars": sum(map(len, patches.values())),
+                "status": "LIMITED" if warnings else "COMPLETE",
+            },
+        )
         prepared = original.model_copy(
             update={
                 "changed_files": [
@@ -173,6 +187,16 @@ class ReviewNodes:
         )
 
     async def review(self, state: ReviewState, *, agent_type: AgentType) -> ReviewState:
+        with log_context(
+            review_id=state["review_id"],
+            repository=state["job"]["repository"],
+            pr_number=state["job"]["pr_number"],
+            agent=agent_type.value,
+            stage=f"{agent_type.value}_agent",
+        ):
+            return await self._review(state, agent_type=agent_type)
+
+    async def _review(self, state: ReviewState, *, agent_type: AgentType) -> ReviewState:
         started = perf_counter()
         context = PullRequestContext.model_validate(state["review_context"])
         agent = self.reviewers[agent_type]
@@ -217,6 +241,16 @@ class ReviewNodes:
                 attempts=1,
                 duration_ms=(perf_counter() - started) * 1000,
             )
+        logger.info(
+            "Review branch completed",
+            extra={
+                "agent": agent_type.value,
+                "stage": f"{agent_type.value}_agent",
+                "status": result.status,
+                "duration_ms": round(result.duration_ms, 2),
+                "attempt": result.attempts,
+            },
+        )
         errors = (
             []
             if result.status == "COMPLETED"

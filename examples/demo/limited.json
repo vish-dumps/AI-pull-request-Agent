@@ -1,0 +1,127 @@
+{
+  "review_id": "00000000-0000-4000-8000-000000000012",
+  "status": "PARTIAL",
+  "mock_mode": true,
+  "persisted": false,
+  "reused": false,
+  "paused": false,
+  "completed_stages": [
+    "ingest",
+    "context",
+    "documentation",
+    "quality",
+    "security",
+    "testing",
+    "aggregate",
+    "persist"
+  ],
+  "pending_nodes": [],
+  "errors": [],
+  "review": {
+    "status": "PARTIAL",
+    "risk": "HIGH",
+    "risk_score": 4.5,
+    "summary": "[MOCK] 4/4 reviewers completed; 1 actionable finding(s). Security: Mock mode: predefined security response; no model was called. Quality: Mock mode: predefined quality response; no model was called. Testing: Mock mode: predefined testing response; no model was called. Documentation: Mock mode: predefined documentation response; no model was called. Coverage was limited.",
+    "recommendation": "REQUEST_CHANGES",
+    "findings": [
+      {
+        "agent_type": "security",
+        "file_path": "src/users.py",
+        "line_number": null,
+        "severity": "HIGH",
+        "title": "Mock example: SQL query includes user input",
+        "description": "Demo finding: username is interpolated into a SQL query.",
+        "suggestion": "Use bound query parameters instead of string interpolation.",
+        "confidence": 0.9
+      }
+    ]
+  },
+  "agent_results": {
+    "documentation": {
+      "agent": "documentation",
+      "status": "COMPLETED",
+      "review": {
+        "findings": [],
+        "summary": "Mock mode: predefined documentation response; no model was called.",
+        "risk_score": 0
+      },
+      "error": null,
+      "attempts": 1,
+      "duration_ms": 1.7407999985152856,
+      "coverage_warnings": [
+        "Limited input prioritizes security/configuration and source files.",
+        "Review limited by the configured file/patch budget.",
+        "Some changed files were not supplied for review."
+      ]
+    },
+    "quality": {
+      "agent": "quality",
+      "status": "COMPLETED",
+      "review": {
+        "findings": [],
+        "summary": "Mock mode: predefined quality response; no model was called.",
+        "risk_score": 0
+      },
+      "error": null,
+      "attempts": 1,
+      "duration_ms": 1.4565000019501895,
+      "coverage_warnings": [
+        "Limited input prioritizes security/configuration and source files.",
+        "Review limited by the configured file/patch budget.",
+        "Some changed files were not supplied for review."
+      ]
+    },
+    "security": {
+      "agent": "security",
+      "status": "COMPLETED",
+      "review": {
+        "findings": [
+          {
+            "agent_type": "security",
+            "file_path": "src/users.py",
+            "line_number": null,
+            "severity": "HIGH",
+            "title": "Mock example: SQL query includes user input",
+            "description": "Demo finding: username is interpolated into a SQL query.",
+            "suggestion": "Use bound query parameters instead of string interpolation.",
+            "confidence": 0.9,
+            "evidence": "query = f\"SELECT * FROM users WHERE name = '{username}'\""
+          }
+        ],
+        "summary": "Mock mode: predefined security response; no model was called.",
+        "risk_score": 70
+      },
+      "error": null,
+      "attempts": 1,
+      "duration_ms": 1.5507999996771105,
+      "coverage_warnings": [
+        "Limited input prioritizes security/configuration and source files.",
+        "Review limited by the configured file/patch budget.",
+        "Some changed files were not supplied for review."
+      ]
+    },
+    "testing": {
+      "agent": "testing",
+      "status": "COMPLETED",
+      "review": {
+        "findings": [],
+        "summary": "Mock mode: predefined testing response; no model was called.",
+        "risk_score": 0
+      },
+      "error": null,
+      "attempts": 1,
+      "duration_ms": 2.0874000038020313,
+      "coverage_warnings": [
+        "Limited input prioritizes security/configuration and source files.",
+        "Review limited by the configured file/patch budget.",
+        "Some changed files were not supplied for review."
+      ]
+    }
+  },
+  "context_source": "diff_only",
+  "retrieved_context": [],
+  "context_warnings": [
+    "Limited input prioritizes security/configuration and source files.",
+    "Review limited by the configured file/patch budget."
+  ]
+}

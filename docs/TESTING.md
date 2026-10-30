@@ -70,6 +70,13 @@ evidence validation, fan-out/fan-in, and scoring run normally. Scenarios verify:
 - Crash after comment creation but before Redis acknowledgement: a rebuilt worker
   recovers the expired receipt and reuses persisted analysis/publication without
   another model call, review row, finding, or comment.
+- Limited file budgets preserve coverage warnings through persistence, API reads,
+  and the final partial comment.
+
+Phase 11 also verifies compacted diff line citations, file priority, skipped
+oversized lines, no clean approval with limited input, concurrent log correlation,
+provider retry correlation, generated demo artifacts, and load-harness
+acceptance/deduplication/draining/readback without network access.
 
 ## PostgreSQL/PGVector and Redis
 
@@ -108,14 +115,18 @@ repository-context and context-checkpoint integration tests.
 
 Verified on Python 3.11.9:
 
-- Default runner: **468 passed, 12 skipped**.
+- Default runner: **483 passed, 12 skipped**.
 - Service runner with PostgreSQL 16.15 / PGVector 0.8.6 and Redis 7.4.11:
-  **590 passed, 11 skipped**.
-- End-to-end scenarios: 10 without services; 40 across the service matrix.
+  **608 passed, 11 skipped**.
+- End-to-end scenarios: 11 without services; 44 across the service matrix.
 - Ruff lint/format checks and installed-dependency compatibility check passed.
 
 Service-enabled skips are SQLite variants of PostgreSQL-only operations. Default
 mode also skips the dedicated real Redis test. These are capability skips, not
-failed scenarios. No coverage percentage, real-provider accuracy, performance
-benchmark, Docker deployment, or CI-platform execution is claimed by these runs.
-Operational polish and the final demo remain Phase 11.
+failed scenarios. No coverage percentage, real-provider accuracy, production
+performance, Docker deployment, or CI-platform execution is claimed by these runs.
+The subsequent Docker milestone separately verified the packaged stack and added
+six fixture/isolation tests: the current default suite is **489 passed, 12 skipped**.
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the actual container result and commands.
+Recorded in-process simulated-load measurements are documented separately in
+[DEMO.md](DEMO.md) and [the benchmark record](../examples/benchmarks/README.md).

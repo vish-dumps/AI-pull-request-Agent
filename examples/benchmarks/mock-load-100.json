@@ -1,0 +1,57 @@
+{
+  "mode": "in_process_simulation",
+  "recorded_at": "2026-10-30T17:10:55.846144+00:00",
+  "python": "3.11.9",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "boundaries": {
+    "http": "ASGI in process",
+    "database": "temporary migrated SQLite",
+    "redis": "fakeredis with Lua",
+    "checkpoints": "in memory",
+    "workers": 1,
+    "review_lock": "single-worker substitute",
+    "github": "fixture HTTP transport",
+    "model": "delayed deterministic mock",
+    "publishing": false,
+    "retrieval": "diff_only"
+  },
+  "input": {
+    "requests": 100,
+    "concurrency": 20,
+    "model_delay_ms": 10.0,
+    "duplicate_every": 10,
+    "same_pr_and_commit": true
+  },
+  "outcome": {
+    "accepted": 100,
+    "duplicates": 10,
+    "unique_reviews": 90,
+    "completed": 90,
+    "partial": 0,
+    "failed": 0,
+    "errors": [],
+    "processed_receipts": 90,
+    "model_calls": 360,
+    "github_pr_reads": 91,
+    "github_file_fetches": 1,
+    "remaining_queue": 0,
+    "inflight": 0
+  },
+  "timings": {
+    "acceptance_seconds": 0.1685,
+    "drain_seconds_from_start": 9.005,
+    "accepted_requests_per_second": 593.58,
+    "completed_reviews_per_second": 9.99,
+    "acceptance_ms": {
+      "p50": 1.25,
+      "p95": 1.64,
+      "p99": 2.245
+    },
+    "review_read_ms": {
+      "p50": 9.745,
+      "p95": 13.872
+    },
+    "observed_max_pending_queue": 90
+  },
+  "successful": true
+}
