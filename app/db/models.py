@@ -2,7 +2,10 @@ from datetime import datetime
 from enum import Enum as PythonEnum
 from uuid import UUID, uuid4
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum,
@@ -160,3 +163,44 @@ class Finding(Base):
     suggestion: Mapped[str] = mapped_column(Text)
     confidence: Mapped[float] = mapped_column(Float)
     review: Mapped[Review] = relationship(back_populates="findings", lazy="raise")
+
+
+class RepositoryIndex(Base):
+    __tablename__ = "repository_indexes"
+    __table_args__ = (
+        UniqueConstraint("repository", "commit_sha", "embedding_identity"),
+        CheckConstraint("repository = lower(repository)", name="lowercase_repository"),
+        CheckConstraint("embedding_dimensions > 0", name="positive_dimensions"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    repository: Mapped[str] = mapped_column(String(140))
+    commit_sha: Mapped[str] = mapped_column(String(40))
+    embedding_identity: Mapped[str] = mapped_column(String(100))
+    embedding_dimensions: Mapped[int] = mapped_column(Integer)
+    mock_mode: Mapped[bool] = mapped_column(Boolean)
+    file_count: Mapped[int] = mapped_column(Integer)
+    chunk_count: Mapped[int] = mapped_column(Integer)
+    limited: Mapped[bool] = mapped_column(Boolean)
+    warnings: Mapped[list[str]] = mapped_column(JSON)
+    indexed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RepositoryChunk(Base):
+    __tablename__ = "repository_chunks"
+    __table_args__ = (
+        UniqueConstraint("index_id", "ordinal"),
+        CheckConstraint("start_line > 0 AND end_line >= start_line", name="line_range"),
+        Index("ix_repository_chunks_index_id", "index_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    index_id: Mapped[UUID] = mapped_column(ForeignKey("repository_indexes.id", ondelete="CASCADE"))
+    ordinal: Mapped[int] = mapped_column(Integer)
+    file_path: Mapped[str] = mapped_column(Text)
+    start_line: Mapped[int] = mapped_column(Integer)
+    end_line: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
+    # Variable dimensions permit explicit, isolated embedding profiles without DDL changes.
+    # JSON supports storage/migration tests on SQLite; similarity requires PostgreSQL.
+    embedding: Mapped[list[float]] = mapped_column(Vector().with_variant(JSON(), "sqlite"))

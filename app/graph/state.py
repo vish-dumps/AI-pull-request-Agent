@@ -5,7 +5,15 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
+from app.schemas.agents import AgentResult
+from app.schemas.context import RetrievedChunk
 from app.schemas.review import ReviewCompletion, ReviewStatus
+
+
+def merge_agent_results(
+    previous: dict[str, dict[str, Any]], updates: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    return {**previous, **updates}
 
 
 class WorkflowError(TypedDict):
@@ -24,6 +32,9 @@ class ReviewState(TypedDict, total=False):
     persistence_enabled: bool
     retrieved_context: list[dict[str, Any]]
     context_source: str
+    retrieval_identity: str | None
+    expected_agents: list[str]
+    agent_results: Annotated[dict[str, dict[str, Any]], merge_agent_results]
     security_result: dict[str, Any]
     aggregated_review: dict[str, Any] | None
     errors: Annotated[list[WorkflowError], add]
@@ -44,3 +55,7 @@ class WorkflowReport(BaseModel):
     pending_nodes: list[str]
     errors: list[WorkflowError] = Field(default_factory=list)
     review: ReviewCompletion | None = None
+    agent_results: dict[str, AgentResult] = Field(default_factory=dict)
+    context_source: str = "diff_only"
+    retrieved_context: list[RetrievedChunk] = Field(default_factory=list)
+    context_warnings: list[str] = Field(default_factory=list)

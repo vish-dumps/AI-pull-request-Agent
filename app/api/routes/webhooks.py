@@ -104,7 +104,7 @@ async def github_webhook(
     try:
         async with asyncio.timeout(settings.webhook_enqueue_timeout_seconds):
             accepted = await queue.enqueue(job)
-    except (RedisError, OSError, TimeoutError) as error:
+    except (RedisError, OSError, TimeoutError, ValueError) as error:
         logger.warning(
             "Webhook enqueue failed",
             extra={"stage": "enqueue", "error_type": type(error).__name__},

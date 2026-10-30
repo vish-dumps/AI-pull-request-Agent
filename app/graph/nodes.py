@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -9,20 +10,24 @@ from langgraph.errors import GraphBubbleUp
 from sqlalchemy.exc import DBAPIError, OperationalError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.agents.security_agent import SecurityAgent, prepare_security_input
+from app.agents.base import ReviewAgent, prepare_review_input
 from app.core.exceptions import (
+    EmbeddingError,
+    RepositoryIndexError,
     ReviewConflictError,
     WorkflowPersistenceError,
     WorkflowTransientError,
 )
 from app.db.repositories import ReviewRepository
 from app.graph.state import ReviewState
-from app.schemas.agents import SecurityAgentResult
+from app.schemas.agents import AgentResult
+from app.schemas.context import RetrievedChunk, RetrievedContext
 from app.schemas.github import PullRequestContext
 from app.schemas.jobs import ReviewJob
-from app.schemas.review import ReviewCompletion, ReviewStatus
-from app.services.aggregation_service import security_completion
-from app.services.github_service import GitHubService
+from app.schemas.review import AgentType, ReviewCompletion, ReviewStatus
+from app.services.aggregation_service import aggregate_reviews
+from app.services.context_service import ContextService
+from app.services.github_service import PullRequestSource
 
 logger = logging.getLogger(__name__)
 TERMINAL_STATUSES = {ReviewStatus.COMPLETED, ReviewStatus.PARTIAL, ReviewStatus.FAILED}
@@ -31,16 +36,19 @@ TERMINAL_STATUSES = {ReviewStatus.COMPLETED, ReviewStatus.PARTIAL, ReviewStatus.
 class ReviewNodes:
     def __init__(
         self,
-        agent: SecurityAgent,
+        reviewers: dict[AgentType, ReviewAgent],
         *,
         mock_mode: bool,
         sessions: async_sessionmaker[AsyncSession] | None = None,
-        github: GitHubService | None = None,
+        github: PullRequestSource | None = None,
+        context_service: ContextService | None = None,
     ) -> None:
-        self.agent = agent
+        self.reviewers = reviewers
+        self.agent = next(iter(reviewers.values()))
         self.mock_mode = mock_mode
         self.sessions = sessions
         self.github = github
+        self.context_service = context_service
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[ReviewRepository]:
@@ -115,7 +123,7 @@ class ReviewNodes:
     async def context(self, state: ReviewState) -> ReviewState:
         started = perf_counter()
         original = PullRequestContext.model_validate(state["pr_context"])
-        _, patches, warnings = prepare_security_input(original, self.agent.settings)
+        _, patches, warnings = prepare_review_input(original, self.agent.settings)
         prepared = original.model_copy(
             update={
                 "changed_files": [
@@ -128,35 +136,84 @@ class ReviewNodes:
                 or len(patches) < len(original.changed_files),
             }
         )
+        retrieved = RetrievedContext()
+        if self.context_service is not None:
+            try:
+                retrieved = await self.context_service.retrieve(prepared)
+            except (
+                EmbeddingError,
+                RepositoryIndexError,
+                SQLAlchemyError,
+                TimeoutError,
+                OSError,
+            ) as error:
+                logger.warning(
+                    "Context retrieval unavailable; reviewing supplied diffs",
+                    extra={
+                        "review_id": state["review_id"],
+                        "stage": "context",
+                        "error_type": type(error).__name__,
+                    },
+                )
+                retrieved = RetrievedContext(
+                    warnings=[
+                        "Repository context retrieval was unavailable; review used supplied diffs."
+                    ]
+                )
+            prepared = prepared.model_copy(
+                update={"warnings": list(dict.fromkeys([*warnings, *retrieved.warnings]))}
+            )
         return self.update(
             "context",
             state,
             started,
             review_context=prepared.model_dump(mode="json"),
-            retrieved_context=[],
-            context_source="diff_only",
+            retrieved_context=[chunk.model_dump(mode="json") for chunk in retrieved.chunks],
+            context_source=retrieved.source,
         )
 
-    async def security(self, state: ReviewState) -> ReviewState:
+    async def review(self, state: ReviewState, *, agent_type: AgentType) -> ReviewState:
         started = perf_counter()
         context = PullRequestContext.model_validate(state["review_context"])
+        agent = self.reviewers[agent_type]
         try:
-            result = await self.agent.review(context)
+            async with asyncio.timeout(agent.settings.agent_timeout_seconds):
+                snippets = [
+                    RetrievedChunk.model_validate(value)
+                    for value in state.get("retrieved_context", [])
+                ]
+                raw = (
+                    await agent.review(context, retrieved_context=snippets)
+                    if snippets
+                    else await agent.review(context)
+                )
+                result = agent.result_schema.model_validate(
+                    raw.model_dump() if isinstance(raw, AgentResult) else raw
+                )
+                if result.agent != agent_type:
+                    raise ValueError("Reviewer result category does not match its branch")
         except GraphBubbleUp:
             raise
+        except TimeoutError:
+            result = agent.result_schema(
+                status="FAILED",
+                error=f"{agent_type.value.capitalize()} agent exceeded its deadline",
+                attempts=1,
+                duration_ms=(perf_counter() - started) * 1000,
+            )
         except Exception as error:
             # Cancellation propagates; unexpected agent exceptions become safe graph data.
             logger.warning(
-                "Security agent raised unexpectedly",
+                "Specialized reviewer raised unexpectedly",
                 extra={
                     "review_id": state["review_id"],
-                    "stage": "security",
+                    "stage": agent_type.value,
                     "error_type": type(error).__name__,
                 },
             )
-            result = SecurityAgentResult(
+            result = agent.result_schema(
                 status="FAILED",
-                error="Security agent failed unexpectedly",
+                error=f"{agent_type.value.capitalize()} agent failed unexpectedly",
                 attempts=1,
                 duration_ms=(perf_counter() - started) * 1000,
             )
@@ -165,27 +222,35 @@ class ReviewNodes:
             if result.status == "COMPLETED"
             else [
                 {
-                    "stage": "security",
+                    "stage": agent_type.value,
                     "message": result.error or "Security review failed",
                 }
             ]
         )
-        return self.update(
-            "security",
-            state,
-            started,
-            security_result=result.model_dump(mode="json"),
-            errors=errors,
-        )
+        changes = {
+            "agent_results": {agent_type.value: result.model_dump(mode="json")},
+            "errors": errors,
+        }
+        if agent_type == AgentType.SECURITY:
+            changes["security_result"] = result.model_dump(mode="json")
+        return self.update(agent_type.value, state, started, **changes)
+
+    def results(self, state: ReviewState) -> dict[AgentType, AgentResult]:
+        data = state.get("agent_results", {})
+        # Version 1 checkpoints may contain only the security-specific channel.
+        if not data and state.get("security_result"):
+            data = {"security": state["security_result"]}
+        if set(data) != {kind.value for kind in self.reviewers}:
+            raise ReviewConflictError("Reviewer results do not match the configured graph")
+        return {
+            kind: reviewer.result_schema.model_validate(data[kind.value])
+            for kind, reviewer in self.reviewers.items()
+        }
 
     async def aggregate(self, state: ReviewState) -> ReviewState:
         started = perf_counter()
-        result = SecurityAgentResult.model_validate(state["security_result"])
-        review = (
-            security_completion(result, mock_mode=self.mock_mode)
-            if result.status == "COMPLETED"
-            else None
-        )
+        results = self.results(state)
+        review = aggregate_reviews(results, tuple(self.reviewers), mock_mode=self.mock_mode)
         return self.update(
             "aggregate",
             state,
@@ -195,7 +260,7 @@ class ReviewNodes:
 
     async def persist(self, state: ReviewState) -> ReviewState:
         started = perf_counter()
-        result = SecurityAgentResult.model_validate(state["security_result"])
+        results = self.results(state)
         completion = (
             ReviewCompletion.model_validate(state["aggregated_review"])
             if state.get("aggregated_review")
@@ -216,7 +281,12 @@ class ReviewNodes:
                 elif completion is not None:
                     await store.complete_review(current.id, completion)
                 else:
-                    await store.fail_review(current.id, result.error or "Security review failed")
+                    message = "; ".join(
+                        f"{kind.value}: {result.error}"
+                        for kind, result in results.items()
+                        if result.status == "FAILED"
+                    )
+                    await store.fail_review(current.id, message[:2000] or "All reviewers failed")
         return self.update(
             "persist", state, started, status=status.value, persisted=self.sessions is not None
         )

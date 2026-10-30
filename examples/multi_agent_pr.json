@@ -1,0 +1,33 @@
+{
+  "repository": "demo/multi-agent-review",
+  "pr_number": 6,
+  "title": "Demo user lookup and service configuration",
+  "description": "Synthetic multi-agent fixture. Other repository tests and documentation are not provided.",
+  "author": "demo-contributor",
+  "base_branch": "main",
+  "head_branch": "demo-multi-agent",
+  "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "head_repository": "demo/multi-agent-review",
+  "changed_files": [
+    {
+      "filename": "src/users.py",
+      "status": "modified",
+      "patch": "@@ -1,2 +1,3 @@\n def find_user(connection, username):\n-    return connection.execute(\"SELECT * FROM users WHERE name = ?\", (username,))\n+    query = f\"SELECT * FROM users WHERE name = '{username}'\"\n+    return connection.execute(query)",
+      "additions": 2,
+      "deletions": 1
+    },
+    {
+      "filename": "src/service.py",
+      "status": "added",
+      "patch": "@@ -0,0 +1,7 @@\n+import os\n+def load_user(user_id):\n+    if not user_id:\n+        raise ValueError(\"user_id is required\")\n+    timeout = int(os.getenv(\"REVIEW_TIMEOUT\", \"30\"))\n+    retries = [value for value in range(1000000)]\n+    return timeout, retries",
+      "additions": 7,
+      "deletions": 0
+    }
+  ],
+  "total_additions": 9,
+  "total_deletions": 1,
+  "total_changed_files": 2,
+  "files_truncated": false,
+  "warnings": []
+}

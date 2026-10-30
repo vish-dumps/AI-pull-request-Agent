@@ -4,13 +4,16 @@ An automated GitHub pull request reviewer being built incrementally with FastAPI
 LangGraph, specialized AI agents, PostgreSQL/PGVector, and Redis. The goal is a small,
 understandable portfolio project with a working demo and defensible engineering choices.
 
-**Current implementation: Phase 5 — checkpointed LangGraph workflow.** Five typed
-graph stages connect ingestion, bounded diff context, the Security Agent,
-deterministic aggregation, and replay-safe persistence. Standalone demos use
+**Current implementation: Phase 8 — Redis background processing and recovery.** Security,
+Quality, Testing, and Documentation Agents run in parallel between context preparation
+and deterministic aggregation. Failed reviewers preserve successful results as a
+partial review. Optional context retrieval supplies bounded related snippets from
+an index of the PR's exact base commit. Standalone demos use
 in-memory checkpoints; persisted workflows use PostgreSQL checkpoints and can
 resume in another process. Signed webhooks, Redis acceptance, Alembic persistence,
-and read APIs remain available. Other reviewers, automatic queue processing,
-semantic retrieval, and GitHub publishing arrive in later phases.
+and read APIs remain available. A separate worker now consumes accepted webhooks,
+tracks status, caches revision-specific PR data, and resumes interrupted work.
+GitHub publishing arrives in Phase 9.
 The original requirements are preserved in [docs/PRD.md](docs/PRD.md).
 
 ## Architecture
@@ -44,27 +47,34 @@ flowchart LR
 The endpoint makes no GitHub or LLM requests. A small Redis script atomically
 deduplicates delivery IDs, stores expiring job/status metadata, and appends the
 full job to `reviews:pending`. This introduces the minimum queue boundary required
-for a quick webhook response. **There is no queue consumer yet:** accepted jobs
-remain queued until the processing worker is added in Phase 8. The GitHub client
-can already retrieve normalized diffs independently using the command below.
+for a quick webhook response. The Phase 8 worker claims these jobs, fetches the
+queued revision, and runs the durable graph. Redis receipts, heartbeats, delayed
+retries, and PostgreSQL review locks coordinate recovery and multiple workers.
 
 Phase 3 adds a separate persistence/read path: a caller saves a validated job and
 PR context through `ReviewRepository`, completes it with findings in one explicit
 transaction, and reads the result through FastAPI. The synthetic demo below
-exercises this path. Webhook acceptance still only writes to Redis; accepted jobs
-do not appear in PostgreSQL or the review API until an ingestion caller persists them.
+exercises this path. Webhook acceptance writes only to Redis; the worker's ingestion
+step creates PostgreSQL records. The status endpoint is available before ingestion.
 
 The manual commands are such callers. They accept normalized PR JSON, run the
-Security Agent through the configured provider, and can persist the outcome for
-the existing read API. This is a manually invoked single-agent path; it does not
+specialized agents through the configured provider, and can persist the outcome for
+the existing read API. This is a manually invoked workflow; it does not
 consume webhook jobs or publish to GitHub.
 
 ```mermaid
 flowchart LR
     Source[Normalized PR JSON / GitHub service] --> Ingest[1. Ingest]
-    Ingest --> Context[2. Prepare diff context]
-    Context --> Security[3. Security Agent]
-    Security --> Aggregate[4. Deduplicate / deterministic risk]
+    Ingest --> Context[2. Prepare diff and optional repository context]
+    Index[(Revision-scoped PGVector index)] --> Context
+    Context --> Security[3a. Security Agent]
+    Context --> Quality[3b. Quality Agent]
+    Context --> Testing[3c. Testing Agent]
+    Context --> Documentation[3d. Documentation Agent]
+    Security --> Aggregate[4. Wait for all / deduplicate / risk]
+    Quality --> Aggregate
+    Testing --> Aggregate
+    Documentation --> Aggregate
     Aggregate --> Persist[5. Persist outcome]
     Persist --> Read[Review API]
     Ingest -. checkpoints .-> Checkpoints[(Memory / PostgreSQL)]
@@ -72,12 +82,12 @@ flowchart LR
     Persist -. checkpoints .-> Checkpoints
 ```
 
-Only the Security Agent runs in Phase 5. Context preparation reports `diff_only`;
-PGVector retrieval remains Phase 7. The final node persists a result; publishing
+All four reviewers run by default. Context preparation reports `diff_only` or
+`pgvector` when retrieval is enabled. The final node persists a result; publishing
 to GitHub remains Phase 9. See [the workflow guide](docs/WORKFLOW.md) for state,
 failure, transaction, and recovery details.
 
-Planned review flow, **not implemented yet**:
+Target end-to-end flow; GitHub publishing remains Phase 9:
 
 ```mermaid
 flowchart TD
@@ -107,18 +117,21 @@ app/
   api/routes/health.py    # Concurrent dependency readiness checks
   api/routes/webhooks.py  # Bounded body, signature validation, quick job acceptance
   api/routes/reviews.py   # Stored review, findings, and repository-history reads
+  api/routes/jobs.py      # Redis status, attempts, safe errors, retry scheduling
+  api/routes/repositories.py # Bounded revision-pinned repository indexing
   core/config.py          # Environment and .env configuration
   core/logging.py         # JSON application logs
   core/security.py        # HMAC-SHA256 signature verification
   core/exceptions.py      # Sanitized GitHub API failures
   db/session.py           # Async SQLAlchemy engine configuration
-  db/models.py            # Four related tables with database constraints
+  db/models.py            # Review data, repository indexes, and vector chunks
   db/repositories.py      # Transaction-scoped review persistence and queries
+  db/context_repository.py # Atomic snapshot replacement and PGVector cosine search
   schemas/github.py       # GitHub payloads and normalized PullRequestContext
   schemas/jobs.py         # Queue contract and webhook responses
   schemas/review.py       # Findings, completion contracts, enums, API responses
   schemas/agents.py       # Security output and agent/run results
-  agents/security_agent.py # Validation, one repair, evidence checks, bounded input
+  agents/                # Shared validation plus four specialized reviewers
   graph/state.py          # JSON-only shared state, reducers, safe result report
   graph/nodes.py          # Five node implementations and transaction boundaries
   graph/workflow.py       # Graph edges, bounded retries, start/resume/report
@@ -126,9 +139,15 @@ app/
   prompts/security.py     # Security-only responsibilities and evidence instructions
   services/github_service.py # GitHub reads, pagination, retries, comment API
   services/job_queue.py   # Atomic delivery deduplication and enqueue
+  services/worker_queue.py # Token-owned receipts, leases, delayed retry, recovery, ACK
+  services/pr_cache.py    # Revision/credential-scoped temporary PR context
+  worker/                # Separate worker CLI, workflow processing, PostgreSQL ownership
   services/llm_service.py # Provider protocol, compatible HTTP adapter, mock provider
   services/review_service.py # Single-agent persistence and deterministic risk
   services/aggregation_service.py # Lightweight deduplication and confidence-weighted risk
+  services/embedding_service.py # Compatible embeddings and free lexical mock
+  services/indexing_service.py # File selection, line-anchored chunks, batched indexing
+  services/context_service.py # Exact-base retrieval and bounded context
 docker/postgres/init.sql  # Enable vector in a fresh database
 examples/pull_request.opened.json # Sample webhook, with fictional commit SHAs
 examples/security_pr.json # Synthetic normalized security-review fixture
@@ -137,6 +156,7 @@ scripts/fetch_pr.py       # Read a real PR as normalized JSON
 scripts/seed_demo.py      # Persist a labeled synthetic review without an LLM
 scripts/review_security.py # Run the Security Agent, optionally persist its result
 scripts/review_workflow.py # Run, pause, or resume the checkpointed workflow
+scripts/index_repository.py # Index GitHub source or a normalized source fixture
 alembic/                  # Async migration environment and versioned schema
 alembic.ini
 tests/
@@ -258,16 +278,29 @@ Without infrastructure, the API still starts and `/health` correctly returns 503
 | `LLM_OUTPUT_MODE` | `json_schema` | Strict schema response format, or explicit `json_object` compatibility |
 | `LLM_REQUEST_TIMEOUT_SECONDS` | `30` | HTTP timeout and overall deadline for each request |
 | `LLM_MAX_ATTEMPTS` | `3` | Total transport attempts per completion, from 1 to 3 |
+| `AGENT_TIMEOUT_SECONDS` | `210` | Whole-reviewer graph deadline, greater than 0 and at most 600 |
 | `LLM_MAX_OUTPUT_TOKENS` | `2048` | Output token budget (128–8192) |
 | `LLM_TOKEN_LIMIT_FIELD` | `max_completion_tokens` | Set `max_tokens` for providers using that field |
 | `MAX_FILES_PER_REVIEW` | `30` | Maximum supplied textual diffs |
 | `MAX_PATCH_CHARS` | `60000` | Total patch-character budget across those files |
+| `RETRIEVAL_ENABLED` | `false` | Opt in to indexed base-commit context in the workflow CLI |
+| `EMBEDDING_MOCK_MODE` | `true` | Free lexical demonstration embeddings |
+| `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` | empty | Explicit compatible provider configuration |
+| `EMBEDDING_API_KEY` | empty | Separate embedding provider credential, when required |
+| `EMBEDDING_DIMENSIONS` | `128` | Expected output dimensions, configurable 8–2000 |
+| `MAX_CONTEXT_CHUNKS` / `MAX_CONTEXT_CHARS` | `3` / `6000` | Maximum retrieved snippets and total snippet characters |
+| `WORKER_MAX_ATTEMPTS` / `WORKER_RETRY_SECONDS` | `3` / `10` | Workflow execution budget and initial infrastructure backoff |
+| `WORKER_LEASE_SECONDS` | `30` | Receipt ownership, renewed every third of this interval |
+| `WORKER_JOB_TIMEOUT_SECONDS` | `600` | Whole workflow execution deadline |
+| `PR_CACHE_TTL_SECONDS` / `PR_CACHE_MAX_BYTES` | `300` / `500000` | Temporary revision-scoped PR context cache |
 
 Environment variables override `.env`. Compose supplies service hostnames `postgres`
-and `redis`; host Python uses `localhost`. Only `EMBEDDING_MODEL` and
-`MAX_CONTEXT_CHUNKS` remain reserved for Phase 7. The LLM configuration is now active
-for the Security Agent command; it does not cause the webhook handler to call an
-LLM. Keep secrets in an untracked `.env`; never commit real tokens.
+and `redis`; host Python uses `localhost`. Embedding, indexing, and retrieval settings
+are active; see [the complete context limits](docs/CONTEXT.md). Neither model nor
+embedding configuration causes the webhook handler to run external analysis.
+See [worker configuration](docs/WORKER.md) for polling, shutdown, Redis deadlines,
+maintenance/dead-letter bounds, and recovery behavior.
+Keep secrets in an untracked `.env`; never commit real tokens.
 
 ## API endpoints
 
@@ -275,6 +308,8 @@ LLM. Keep secrets in an untracked `.env`; never commit real tokens.
 | --- | --- | --- |
 | GET | `/health` | 200 if PostgreSQL, vector extension, and Redis are available; otherwise 503 |
 | POST | `/webhooks/github` | Verify a signed delivery, enqueue supported PR events, return 202 |
+| POST | `/repositories/index` | Index selected source at a resolved commit; bounded synchronous HTTP 200 with counts/coverage |
+| GET | `/reviews/{review_id}/status` | Redis job status, attempts, safe error and retry time; 404 if unknown/expired |
 | GET | `/reviews/{review_id}` | Stored review and findings; 404 if not persisted |
 | GET | `/reviews/{review_id}/findings` | Findings for a stored review; 404 for unknown review |
 | GET | `/repositories/{owner}/{repository}/reviews` | Case-insensitive history, `limit=20` (1–100), `offset=0` |
@@ -291,6 +326,7 @@ erDiagram
     REPOSITORIES ||--o{ PULL_REQUESTS : contains
     PULL_REQUESTS ||--o{ REVIEWS : receives
     REVIEWS ||--o{ FINDINGS : contains
+    REPOSITORY_INDEXES ||--o{ REPOSITORY_CHUNKS : contains
     REPOSITORIES {
         uuid id PK
         string github_full_name UK
@@ -328,6 +364,25 @@ erDiagram
         int line_number
         float confidence
     }
+    REPOSITORY_INDEXES {
+        uuid id PK
+        string repository
+        string commit_sha
+        string embedding_identity
+        int embedding_dimensions
+        bool limited
+        datetime indexed_at
+    }
+    REPOSITORY_CHUNKS {
+        uuid id PK
+        uuid index_id FK
+        int ordinal
+        string file_path
+        int start_line
+        int end_line
+        text content
+        vector embedding
+    }
 ```
 
 Repository identifiers are stored lowercase because GitHub names are case
@@ -361,8 +416,11 @@ together. Savepoints handle concurrent repository/PR creation. Queries eagerly
 load required relationships; other relationship access raises instead of causing
 unexpected async database I/O.
 
-`repository_chunks` and vector retrieval arrive in Phase 7. The existing Compose
-initialization still enables PGVector; Phase 3 only migrates relational review data.
+Migration `0002` adds repository snapshot metadata and vector chunks. Snapshot keys
+isolate repository, commit SHA, and embedding profile. Index replacement is atomic,
+and source/embedding I/O takes place outside database transactions. Retrieval uses
+exact PGVector cosine search within the matching PR base snapshot. The migration
+enables the extension when necessary; its binaries must be installed on the server.
 
 ## Phase 3 persistence demo
 
@@ -432,7 +490,8 @@ For host Python, apply migrations first, then use the same script with `--persis
 If no review ID is supplied, a fresh job/review ID is generated. Retrying the same
 ID and PR revision reuses an already terminal stored result without another model
 call or duplicate findings. Conflicting revisions are rejected. This command is
-intended for one caller per review ID; concurrent worker leases/recovery arrive later.
+intended for one caller per review ID. Do not manually run/resume an active
+worker-owned ID; the worker coordinates its own callers through leases and DB locks.
 
 The demo persists `PARTIAL`, `HIGH`, risk score `4.5`, `REQUEST_CHANGES`, and one
 security finding with a `[MOCK]` summary. `PARTIAL` is intentional: testing, quality,
@@ -472,11 +531,15 @@ changing the agent.
 The provider retries timeouts, network errors, HTTP 429, and server errors at most
 `LLM_MAX_ATTEMPTS` total attempts. Backoff is 0.5 then 1 second. Numeric `Retry-After`
 delays up to 5 seconds are respected; longer or unsupported delays return a
-controlled deferred-retry failure for future worker scheduling. Permanent HTTP
+controlled failure. Typed agent failures are final graph outcomes rather than
+automatic new worker executions. Permanent HTTP
 errors, refusals, interrupted output, empty content, and invalid response envelopes
 fail without repeated generation. API redirects are not followed. The agent can
 request one additional completion for invalid output, so the worst-case default
-budget is **two completions × three transport attempts = six HTTP requests**.
+budget per reviewer is **two completions × three transport attempts = six HTTP
+requests**, or up to 24 across four reviewers. The graph also applies the
+`AGENT_TIMEOUT_SECONDS` deadline independently to each reviewer, including repairs
+and transport retries; reaching it produces a failed reviewer outcome.
 
 ## Security output and validation
 
@@ -514,17 +577,31 @@ The single-agent persistence path calculates `sum(severity_weight × confidence)
 using `LOW=1`, `MEDIUM=2`, `HIGH=5`, `CRITICAL=10`. Score thresholds are 1 for medium,
 4 for high, and 8 for critical. Scores at least 4 recommend `REQUEST_CHANGES`;
 other security-only results recommend `COMMENT`, including zero findings. The
-model's advisory score does not choose the stored risk or recommendation. This is
-not the future multi-agent aggregator; deduplication and all-agent scoring come later.
+model's advisory score does not choose the stored risk or recommendation. The full
+workflow uses the same weights after deduplicating findings across all reviewers.
 
 Ingestion commits before model I/O. The agent runs with no open database
 transaction, and completion/findings or failure persist in a separate transaction.
 Raw agent evidence stays in the returned agent result; the database stores the
 existing common finding fields. The Phase 4 persistence service now delegates to
 the shared five-stage graph. Its convenience command uses in-memory checkpoints;
-use the Phase 5 workflow command for durable cross-process recovery.
+use the workflow command below for durable cross-process recovery.
 
-## Phase 5 LangGraph demo
+## Phase 6 multi-agent demo
+
+Each reviewer has a distinct prompt and category-specific output schema:
+
+| Reviewer | Focus |
+| --- | --- |
+| Security | Exploitable regressions such as injection and authorization errors |
+| Quality | Concrete correctness, maintainability, and performance problems |
+| Testing | Specific missing regression cases supported by changed behavior |
+| Documentation | User-facing behavior or configuration needing explanation |
+
+All share bounded input, strict validation, exact diff evidence checks, and at most
+one repair completion. Testing and Documentation qualify gaps against the supplied
+context rather than assuming the rest of the repository has no tests or docs.
+No reviewer executes repository code.
 
 Run the complete graph locally without infrastructure or credits:
 
@@ -532,23 +609,27 @@ Run the complete graph locally without infrastructure or credits:
 .\.venv\Scripts\python.exe scripts/review_workflow.py --mock
 ```
 
-The JSON report shows all five completed stages, deterministic risk/findings, and
-`persisted: false`. In this mode the final node returns the result without writing
+The default fixture is `examples/multi_agent_pr.json`. Its report shows eight
+completed nodes (including four parallel reviewers), four findings, `COMPLETED`,
+risk score `7.7`, `REQUEST_CHANGES`, and `persisted: false`. Each reviewer includes
+its status, attempts, timing, and validated output. The mock provider returns
+predefined fixture responses; it is not a general code analyzer.
+In this mode the final node returns the result without writing
 to a database, and checkpoints last only as long as that process.
 
 For a durable pause/resume demo with Compose:
 
 ```powershell
 docker compose up --build -d
-docker compose exec api python scripts/review_workflow.py --mock --persist --review-id 00000000-0000-4000-8000-000000000005 --stop-before-persist
-docker compose exec api python scripts/review_workflow.py --mock --persist --resume 00000000-0000-4000-8000-000000000005
-Invoke-RestMethod http://localhost:8000/reviews/00000000-0000-4000-8000-000000000005
+docker compose exec api python scripts/review_workflow.py --mock --persist --review-id 00000000-0000-4000-8000-000000000006 --stop-before-persist
+docker compose exec api python scripts/review_workflow.py --mock --persist --resume 00000000-0000-4000-8000-000000000006
+Invoke-RestMethod http://localhost:8000/reviews/00000000-0000-4000-8000-000000000006
 ```
 
 The first process stops after aggregation with `paused: true`, `status: PROCESSING`,
 and `pending_nodes: ["persist"]`. The second loads PostgreSQL checkpoints and
-finishes the write without rerunning the checkpointed Security Agent. It returns
-`PARTIAL`, risk score `4.5`, one finding, and `persisted: true`. Here `persisted`
+finishes the write without rerunning any checkpointed reviewer. It returns
+`COMPLETED`, risk score `7.7`, four findings, and `persisted: true`. Here `persisted`
 means the final application result, not the checkpoint itself. Repeating the resume
 returns the stored result with `reused: true`; it does not add another finding.
 Use a fresh UUID when repeating the pause demo as a new review.
@@ -558,20 +639,95 @@ prefix with `.\.venv\Scripts\python.exe`. The CLI chooses a selector event loop 
 Windows because the PostgreSQL checkpoint driver's async API requires it.
 The same `--mock` and `--persist` modes must be used when resuming a thread.
 
-Business tables remain under Alembic revision `0001`. The official PostgreSQL
+Full reviews use checkpoint schema version 2 and validate the reviewer set on
+resume. For a Phase 5 checkpoint or a security-only demo, add `--security-only`
+to both start and resume commands; this preserves the version 1 graph. An old
+checkpoint cannot silently become a four-reviewer run.
+
+`COMPLETED` means all four reviewers succeeded with full supplied diff coverage;
+it can still recommend changes. Failed/omitted reviewers or coverage warnings
+produce `PARTIAL`; all reviewers failing produces `FAILED`. Only a complete review
+with zero findings can recommend `APPROVE`. A barrier waits for every branch before
+aggregation. Successfully saved sibling outputs survive interruption and are reused
+when a pending reviewer resumes.
+
+Business tables are under Alembic revision `0002`. The official PostgreSQL
 checkpointer manages its own internal tables in the separate `review_workflow`
 schema, initialized by its `setup()` method. This keeps them outside business
 schema autogeneration. The configured database role must be allowed to create the
 schema and its tables. SQLAlchemy/asyncpg still owns business data; Psycopg 3 is
 used by the official LangGraph checkpointer. No separate database service is added.
 
-This remains a manual workflow. Automated queue consumption and worker leases
-are Phase 8, concurrent specialist agents are Phase 6, and semantic retrieval is
-Phase 7. Checkpoint recovery does not imply exactly-once execution: a node that
-had not completed its checkpoint can run again. One caller per review thread is
-required until worker coordination is implemented.
+These commands manually invoke the same graph used by the Phase 8 worker.
+Checkpoint recovery does not imply exactly-once execution: a node without durable
+output can run again. Worker leases and PostgreSQL session locks coordinate worker
+instances; manual callers must avoid active worker-owned review IDs.
+
+## Phase 7 PGVector demo
+
+After configuring a PostgreSQL/PGVector database in `.env`, run without paid calls:
+
+```powershell
+.\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe scripts/index_repository.py --mock --fixture examples/repository_index.json
+.\.venv\Scripts\python.exe scripts/review_workflow.py --mock --persist --with-context
+```
+
+The workflow retrieves related test, database, and README snippets from the fixture's
+exact base commit. Reports include `context_source=pgvector` and bounded snippets
+with paths, revisions, line ranges, and similarity. All reviewers receive the same
+supporting context; findings must still cite changed-file evidence. Mock embeddings
+demonstrate lexical ranking, not semantic model quality.
+
+Index a real repository through `POST /repositories/index` with
+`{"repository":"OWNER/REPOSITORY","ref":"BASE_COMMIT_SHA"}`, or use
+`scripts/index_repository.py OWNER/REPOSITORY --ref BASE_COMMIT_SHA --mock`.
+This reads GitHub; the fixture command above does not. Missing matching indexes or
+unavailable retrieval keep diff findings and mark coverage partial. Disabled
+retrieval leaves the existing standalone demo available.
+
+Retrieval-enabled checkpoints use version 3; resume with the same retrieval mode,
+embedding profile, and budgets. Use `--diff-only` to select older full-review
+checkpoints. See [repository context](docs/CONTEXT.md) for configuration, file policy,
+provider setup, storage guarantees, and the durable pause/resume demo.
+
+## Phase 8 worker
+
+Compose now starts a separate worker after the API's healthy migration/startup.
+For host Python with PostgreSQL/PGVector and Redis configured:
+
+```powershell
+.\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe -m app.worker --mock
+```
+
+The worker continuously processes accepted webhook jobs. `--mock` prevents paid
+model/embedding calls; GitHub reads still use the real configured service. A real
+PR payload must contain current base/head SHAs. The old fictional sample demonstrates
+enqueueing and will fail ingestion when its revision cannot be verified.
+
+Use `--once` for one maintenance/claim pass and at most one job. Add `--with-context`
+for indexed base-commit retrieval, or `--diff-only` to disable it. Ctrl+C/SIGTERM
+stops claims, gives in-flight work a grace period, then leaves checkpoints/receipts
+for recovery. No GitHub comment is posted.
+
+```powershell
+Invoke-RestMethod http://localhost:8000/reviews/REVIEW_UUID/status
+Invoke-RestMethod http://localhost:8000/reviews/REVIEW_UUID
+```
+
+Status progresses QUEUED → PROCESSING → COMPLETED/PARTIAL/FAILED. Retriable
+infrastructure failures return QUEUED with a retry time. Jobs rejected before
+ingestion can be FAILED in Redis without a fabricated PostgreSQL review. Final
+PostgreSQL results are reused when a final checkpoint or Redis ACK was interrupted.
+Payloads in pending/processing/delayed structures survive expiring display metadata.
+See [the worker guide](docs/WORKER.md) for ownership, retries, cache behavior,
+dead letters, limits, and verification. Business migration remains `0002`.
 
 ## Phase 2 webhook demo
+
+For this historical enqueue-only walkthrough, stop the new consumer with
+`docker compose stop worker`; restart it afterwards with `docker compose start worker`.
 
 In `.env`, set `GITHUB_WEBHOOK_SECRET` to a randomly generated secret of your own.
 For example, print a fresh secret locally with
@@ -608,7 +764,8 @@ The second response returns the same `review_id`, sets `duplicate` to `true`,
 and does not append a second queue entry. Different deliveries, including new
 `synchronize` events, create new jobs. Deduplication expires after the configured
 TTL; the queue itself has no TTL and contains each complete job. Pending entries
-survive metadata expiry. There is no consumer or automatic queue draining yet.
+survive metadata expiry. A running worker consumes the queue automatically.
+Redelivery returns the retained current status, which can already be terminal.
 
 For an API running directly on the host, replace the sender command with
 `.\.venv\Scripts\python.exe scripts/send_webhook.py`.
@@ -653,11 +810,11 @@ deletions, reported file totals, and coverage warnings. The client pages through
 file results sequentially, up to GitHub's 3,000-file API limit, and preserves absent
 patches as `null`. It marks context incomplete when reported file counts exceed
 retrieved files. It checks the base/head SHAs before and after fetching files;
-future ingestion can supply a queued job's expected SHAs to reject a stale revision.
+worker ingestion supplies a queued job's expected SHAs to reject a stale revision.
 
 Temporary GET failures retry at most three total attempts, with 0.5/1-second
 backoff. Permanent errors, rate limits, and server `Retry-After` responses fail
-without early retries; scheduling later attempts belongs to the future worker.
+without early inline retries; the worker schedules supported retry/reset windows.
 POSTs are not retried automatically because a timed-out comment request may
 already have succeeded. File reads are bounded UTF-8 text reads at an explicit
 revision. The client constructs trusted API paths rather than following payload
@@ -701,10 +858,11 @@ creates a unique `test_<uuid>` schema, applies migrations there, and removes onl
 that schema during cleanup. Existing application tables are not used. PostgreSQL
 also verifies concurrent duplicate ingestion; that specific case is skipped on SQLite.
 
-Phase 5 local verification on Python 3.11.9: **230 passed, 2 skipped** without a
-database server; **269 passed, 2 skipped** with PostgreSQL 18 enabled. The skips
-are SQLite versions of concurrency and durable-checkpointer cases that pass on
-PostgreSQL. Ruff lint,
+Phase 8 local verification on Python 3.11.9: **413 passed, 12 skipped** without
+external services; **481 passed, 11 skipped** with PostgreSQL 16.15 / PGVector 0.8.6
+and Redis 7.4.11 enabled. The latter skips are SQLite variants of cases requiring
+PostgreSQL locks/checkpoints/vector operations; their PostgreSQL counterparts pass.
+The default suite additionally skips the real Redis check. Ruff lint,
 format checks, and dependency compatibility checks passed.
 A real Uvicorn process served `/docs` and `/openapi.json` with HTTP 200 and
 returned the expected HTTP 503 when connected to unavailable PostgreSQL/Redis
@@ -716,9 +874,9 @@ Phase 3 also verified `alembic upgrade head`, `alembic check`, repeated seeding,
 and real HTTP review/findings/history reads against a separate temporary local
 PostgreSQL cluster. Earlier dependency resolutions emitted a Starlette HTTPX
 warning; the current tested dependency set includes HTTPX2 and no longer emits it.
-Docker is not installed on
-the implementation machine, so container builds and a healthy response against
-real services remain unverified.
+Docker is not installed on the implementation machine, so container builds and
+Compose startup remain unverified. Phase 8 verified a healthy HTTP response
+against the separate real local PostgreSQL/PGVector and Redis processes.
 
 Phase 4 adds mock/no-network tests, provider wire-format and retry tests, structured
 schema/repair/evidence checks, citation rejection, input budgets, deterministic
@@ -737,6 +895,32 @@ before resuming. Separate CLI processes also paused/resumed a real PostgreSQL
 checkpoint; live HTTP reads confirmed one stored finding. `alembic check` reported
 no business-schema drift after checkpoint table creation.
 
+Phase 6 adds async-barrier concurrency checks, specialized schemas/prompts,
+independent failure/deadline tests, all-failed handling, Unicode-safe deduplication,
+and partial-result persistence/API reads. A real PostgreSQL checkpoint test
+reopened the connection and resumed only the interrupted reviewer, reusing three
+saved sibling outputs. Separate CLI processes completed and reused the four-agent
+review and resumed an actual Phase 5 checkpoint with `--security-only`. Live HTTP
+review/findings/history reads confirmed four categories, COMPLETED, and score 7.7.
+
+Phase 7 tests cover embedding response/retry validation, revision-pinned GitHub
+indexing, selection/budgets, atomic replacement/rollback/concurrent writers, real
+PGVector ranking and scope isolation, safe API errors, bounded prompt injection,
+deadline fallback, and durable context reuse after index removal. A live HTTP
+indexing request used a loopback GitHub fixture server, persisted three chunks,
+and fed a separate-process pause/resume workflow. Live review/findings/history
+reads confirmed the result. Final `alembic check` found no schema drift; 72 installed
+packages passed dependency checks. Paid providers and Docker remain unverified.
+
+Phase 8 adds queue ownership/recovery, delayed retries, safe status reads,
+cache validation, graceful cancellation, real advisory locks, retry exhaustion,
+and synchronization of partial/failed/completed results. A live signed-webhook
+run used separate API/worker processes and loopback GitHub/model fixtures. Killing
+one worker with three saved reviewer outputs, restarting real Redis from AOF, and
+starting another worker reran only the interrupted reviewer. PR cache reuse avoided
+another file fetch; final HTTP reads returned four findings and score 7.7. No paid
+API calls or GitHub writes occurred. See [worker verification](docs/WORKER.md).
+
 For a real infrastructure check, start Compose and verify the healthy response.
 Then stop Redis with `docker compose stop redis`: `/health` should return HTTP 503
 with Redis `down`. Start it again with `docker compose start redis` and verify the
@@ -749,11 +933,13 @@ endpoint recovers. PostgreSQL/PGVector should remain `up` during that check.
 - **SQLAlchemy and asyncpg:** asynchronous PostgreSQL connections, a small pool,
   stale-connection checks, bounded connection acquisition, and explicit caller-owned
   transactions. Alembic tracks schema changes; eager queries avoid implicit async I/O.
-- **PostgreSQL with PGVector:** one database for future relational review data and
-  contextual vector retrieval. Only the extension is initialized in Phase 1.
+- **PostgreSQL with PGVector:** relational reviews and revision-scoped context in
+  one database. Exact cosine search suits the bounded corpus; vector profiles stay
+  separate by endpoint/model/dimensions and mock mode.
 - **Redis:** a small script gives atomic job acceptance and delivery deduplication.
   Queue entries contain the whole job, so expiring status metadata cannot erase
-  pending work. A consumer with acknowledgement/recovery and caching comes later.
+  pending work. Token-owned receipts, delayed retries, heartbeats, PostgreSQL
+  ownership, and a revision-scoped PR cache provide practical processing/recovery.
 - **GitHub boundary:** normalized Pydantic objects keep external payload details
   out of future agents. SHA checks detect stale ingestion; bounded retries and
   trusted URL construction keep failures controlled.
@@ -766,8 +952,8 @@ endpoint recovers. PostgreSQL/PGVector should remain `up` during that check.
   The compatible provider reuses HTTPX; it needs no model
   SDK or LangChain wrapper yet. There are no placeholder reviewer implementations.
 - **Probabilistic/deterministic boundary:** model output is validated against a
-  schema and the supplied diff; application code determines persisted security risk.
-  Security-only output is partial so missing reviewer categories remain visible.
+  schema and the supplied diff; application code deduplicates and determines risk.
+  Missing or failed reviewer categories remain visible through partial status.
 
 ## Development plan
 
@@ -781,28 +967,31 @@ endpoint recovers. PostgreSQL/PGVector should remain `up` during that check.
    one repair, deterministic mock mode, input limits, and optional persistence.
 5. **LangGraph (implemented):** typed state, five nodes, conditional reuse, bounded
    database retries, deterministic aggregation, durable checkpoints, and resume.
-6. **Multiple agents:** quality, testing, documentation; concurrent execution and partial results.
-7. **PGVector:** repository indexing, embeddings, similarity retrieval, bounded context.
-8. **Redis processing:** queue, worker, status tracking, temporary cache.
+6. **Multiple agents (implemented):** quality, testing, documentation; concurrent execution,
+   isolated failures/deadlines, shared findings, and partial-result aggregation.
+7. **PGVector (implemented):** revision-pinned indexing, batched embedding providers,
+   atomic vector snapshots, cosine similarity, bounded injection, and checkpoint reuse.
+8. **Redis processing (implemented):** separate worker, reliable receipts/leases,
+   recovery, delayed retries, status API, and temporary revision-scoped PR cache.
 9. **GitHub output:** a single readable Markdown review comment.
 10. **Workflow tests:** webhook-to-review integration with mocked external services.
 11. **Polish:** retries, large-PR limits, timings, simulated load script, demo documentation.
 
 ## Limitations and future improvements
 
-Phase 5 runs a checkpointed, manually invoked Security Agent workflow, optionally
-persisting its partial result. It does not process pending webhook jobs automatically. Until the worker
-arrives, webhook deliveries accumulate in Redis and require a later ingestion caller
-to create their database records. Redis status and PostgreSQL status are not yet
-synchronized by a worker.
+Phase 8 processes signed webhook jobs in a separate worker with optional indexed
+context and reconciles Redis outcomes with persisted PostgreSQL results. This is
+at-least-once processing; unfinished model work can repeat after a crash. Worker
+ownership uses a standalone Redis deployment and PostgreSQL session locks, not a
+distributed exactly-once or failover guarantee. Expired Redis display metadata is
+not durable history; completed review reads remain available from PostgreSQL.
 Basic input budgets are implemented; chunked review and advanced large-PR handling
 remain future work. Infrastructure
 containers must be verified on a Docker-capable machine. The current credentials
 and configuration target local development. Dependencies use compatible version
 ranges; release deployments should use a pinned dependency resolution.
 
-Future documentation will add parallel-agent responsibilities, GitHub output,
-and benchmark methodology. LLM reviews can produce
+Future documentation will add GitHub output and benchmark methodology. LLM reviews can produce
 false positives, retrieval is approximate, diff-only analysis can miss runtime
 behavior, and large PRs require bounded context. Human review and validation of
 generated suggestions remain necessary.

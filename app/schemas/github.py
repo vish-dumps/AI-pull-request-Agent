@@ -97,3 +97,17 @@ class PullRequestContext(BaseModel):
     total_changed_files: int = Field(ge=0)
     files_truncated: bool = False
     warnings: list[str] = Field(default_factory=list)
+
+
+class GitTreeEntry(BaseModel):
+    path: str
+    mode: str
+    type: str
+    sha: CommitSHA
+    size: int | None = Field(default=None, ge=0)
+
+
+class GitTree(BaseModel):
+    sha: CommitSHA
+    tree: list[GitTreeEntry] = Field(max_length=100000)
+    truncated: bool = Field(strict=True)

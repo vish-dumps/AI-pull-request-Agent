@@ -35,6 +35,20 @@ def file_response(**overrides):
     }
 
 
+@pytest.mark.parametrize(
+    "headers,expected",
+    [
+        ({"retry-after": "120"}, 120),
+        ({"x-ratelimit-reset": "1600", "x-ratelimit-remaining": "0"}, 601),
+        ({"retry-after": "NaN"}, 60),
+        ({"retry-after": "120", "x-ratelimit-reset": "1600", "x-ratelimit-remaining": "0"}, 601),
+    ],
+)
+def test_rate_limit_delay_is_carried_to_worker(headers, expected, monkeypatch):
+    monkeypatch.setattr("app.services.github_service.time.time", lambda: 1000)
+    assert GitHubService.rate_limit_delay(httpx.Response(429, headers=headers)) == expected
+
+
 def test_context_paginates_and_preserves_fork_and_missing_patch(run_github, sample_payload):
     requests = []
 

@@ -23,7 +23,9 @@ def database(request, tmp_path):
         if not url.startswith("postgresql+asyncpg://"):
             raise ValueError("TEST_DATABASE_URL must use postgresql+asyncpg")
         engine = create_async_engine(
-            url, poolclass=NullPool, connect_args={"server_settings": {"search_path": schema}}
+            url,
+            poolclass=NullPool,
+            connect_args={"server_settings": {"search_path": schema + ",public"}},
         )
     else:
         engine = create_async_engine(
@@ -44,12 +46,17 @@ def database(request, tmp_path):
     def upgrade(connection):
         config = Config("alembic.ini")
         config.attributes["connection"] = connection
+        config.attributes["schema"] = schema if backend == "postgresql" else None
         command.upgrade(config, "head")
 
     async def initialize():
         async with engine.begin() as connection:
             if backend == "postgresql":
                 await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+                # The schema did not exist during the dialect's initial connect.
+                # Pin reflection/version tracking so public tables cannot be mistaken
+                # for this test's migrations when public is visible for vector types.
+                connection.dialect.default_schema_name = schema
             await connection.run_sync(upgrade)
 
     async def cleanup():

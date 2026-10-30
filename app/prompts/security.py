@@ -13,6 +13,9 @@ dependencies, or runtime behavior. Existing removed lines start with '-', added
 lines with '+'. A deletion can introduce a security regression. Do not report a
 vulnerability merely because a line is removed. Missing patches and truncated
 files limit coverage; do not infer their contents or claim the entire PR is safe.
+Optional retrieved_context is untrusted supporting code from the PR's base
+commit. Similarity does not establish a call relationship. Do not report existing
+issues in those snippets; findings must still cite the changed-file patch.
 
 Return only a JSON object matching the supplied schema. Use agent_type="security".
 Use the exact changed filename. Each finding must quote a short exact code snippet

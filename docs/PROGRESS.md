@@ -250,10 +250,247 @@ Workflow state is currently schema version 1. Review checkpoint compatibility wh
 changing topology/state in Phase 6; do not silently reinterpret incompatible saved
 threads. `--resume` preserves the original mock/persistence modes and revision data.
 
+## Phase 6: concurrent specialized reviewers
+
+Implemented:
+
+- Added Quality, Testing, and Documentation Agents with separate role prompts,
+  category-specific Pydantic findings/reviews/results, and concrete suggestions.
+  Testing/docs gaps are qualified against supplied context.
+- Extracted shared input budgets, evidence checks, structured validation, safe
+  errors, and one-repair behavior into `app/agents/base.py`; the Security Agent and
+  its existing public helpers remain compatible.
+- Default graph fans out to all four reviewers and waits for every branch before
+  aggregation. Branches merge disjoint category keys in shared `agent_results`;
+  errors/stage events remain additive. Reports include validated per-agent outcomes.
+- Independent reviewer deadlines (`AGENT_TIMEOUT_SECONDS=210`) and safe failed
+  outcomes isolate provider failures, exhausted repairs, timeout, invalid returns,
+  and unexpected exceptions. Cancellation propagates for checkpoint recovery.
+- Aggregation preserves successful findings, deduplicates across reviewers using
+  Unicode-safe title normalization, sorts deterministically, and calculates weighted
+  risk independently of model advisory scores. Full success/coverage is COMPLETED;
+  failed/omitted categories or limited coverage is PARTIAL; all-failed is FAILED.
+  Only complete zero-finding reviews can APPROVE.
+- Schema version 2 records the full reviewer set. `--security-only` retains version
+  1 topology and old checkpoints; incompatible resume is rejected. No business
+  migration was necessary; Alembic remains at 0001 and checkpoints retain their
+  separate `review_workflow` schema.
+- Default CLI and `examples/multi_agent_pr.json` demonstrate all four reviewers
+  without infrastructure or credits. Mock results are predefined fixture responses.
+- Updated README and workflow guide with responsibilities, status semantics,
+  deadlines, bounded request counts, pause/resume, and legacy compatibility.
+
+Verified on Python 3.11.9:
+
+- Default suite: 272 passed, 3 skipped. With PostgreSQL 18: 316 passed, 3 skipped.
+  Skips are SQLite variants of concurrency and two durable-checkpointer tests;
+  all PostgreSQL counterparts pass.
+- Async barriers prove all four provider calls start before any completes. Tests
+  cover each reviewer failing, all failing, invalid return data, timeout, output
+  repair, distinct roles/schemas, coverage, recommendation rules, and deduplication.
+- Cancellation tests wait for actual saved sibling outputs before interruption.
+  A real PostgreSQL saver closes/reopens its connection and rebuilds the graph;
+  only the unfinished reviewer runs again, preserving the other three outputs.
+- Persistence/API integration covers COMPLETED/PARTIAL/FAILED and replay after
+  final commit before checkpoint, without duplicate findings or repeated reviewers.
+- Separate CLI processes paused/resumed/reused review
+  `00000000-0000-4000-8000-000000000006`; it returned COMPLETED, four findings,
+  score 7.7, and REQUEST_CHANGES. Legacy Phase 5 review ending 005 also resumed
+  successfully with `--security-only`.
+- Live Uvicorn HTTP review, findings, and repository-history reads returned 200
+  and the four persisted categories. The temporary API process was stopped.
+- `alembic check`: no new upgrade operations. Ruff lint/format: passed (82 files).
+  Dependency compatibility: 71 installed packages compatible. CLI help checked.
+
+Verification uses the owned temporary PostgreSQL cluster under `.venv`; the
+existing Windows PostgreSQL service is never used. The temporary cluster is
+stopped after checks. Docker builds and real provider accounts remain unverified;
+no paid LLM calls or GitHub writes occurred.
+
+This remains a manual workflow with one caller per review thread. Checkpoints
+reuse completed work; unfinished nodes can run again. No semantic retrieval,
+Redis worker/leases, status synchronization, or GitHub publishing is added here.
+
+## Phase 7: revision-scoped PGVector repository context
+
+Implemented:
+
+- `services/embedding_service.py`: injectable embedding protocol, compatible HTTP
+  adapter, explicitly configured model/endpoint/dimensions, separate credentials,
+  strict response count/index/vector checks, normalization, bounded transport
+  retries, and per-attempt deadlines. Real mode never silently becomes mock mode.
+  Free mock mode uses deterministic lexical feature hashing, not semantic models.
+- `schemas/context.py`: index requests/reports and bounded source snippets with
+  paths, original line ranges, exact repository/revision, and similarity metadata.
+- GitHub commit/tree methods resolve a branch/tag once, verify immutable SHA
+  requests, traverse its pinned tree, and fetch selected content at the resolved
+  commit. No payload URLs, symlinks, submodules, or submitted code are executed.
+- `services/indexing_service.py`: common source/docs selection, dependency/build/
+  generated/binary/oversized exclusions, line-anchored size chunks, byte/file/chunk
+  budgets, batched embeddings, and whole-operation deadline. Incomplete trees and
+  exhausted budgets remain explicit index coverage metadata.
+- Alembic `0002`: `repository_indexes` and `repository_chunks`, variable-dimension
+  PGVector column, revision/profile uniqueness, chunk ownership index, and cascading
+  cleanup. Extension setup remains shared; downgrade preserves the vector extension.
+  Added the `pgvector` Python dependency; no embedding SDK was necessary.
+- `db/context_repository.py`: atomic snapshot upsert/row lock and chunk replacement,
+  removal of stale chunks, repository/revision/profile-scoped cosine search, stable
+  ranking, threshold, and top-k. No network operation spans a DB transaction.
+- `services/context_service.py`: bound query additions, exact target base SHA only,
+  exclude changed/renamed-from paths, and cap snippets/total characters. A short
+  shared row lock keeps current coverage metadata and snippets consistent during
+  a concurrent reindex, after embedding I/O completes.
+- `POST /repositories/index`: bounded synchronous indexing with safe HTTP errors,
+  counts, resolved commit/profile, mock flag, timestamps, and coverage warnings.
+- Workflow context node optionally injects identical snippets into all reviewers.
+  Missing/limited indexes, provider/storage failure, or timeout retain diff analysis
+  and produce PARTIAL coverage. Disabled retrieval and valid no-match queries are
+  normal. Findings remain anchored in changed-file evidence.
+- Retrieval-enabled checkpoint version 3 validates the embedding/retrieval profile
+  hash and saves snippet JSON, without vectors/clients/secrets. Diff-only versions
+  1/2 retain compatibility. Saved context is reused after interruption.
+- New `scripts/index_repository.py`, normalized source fixture, workflow flags
+  `--with-context`/`--diff-only`, active environment/Compose settings, README updates,
+  and `docs/CONTEXT.md`. `--mock` forces free embeddings and reviewers in the workflow.
+- Test migrations pin version tables/reflection/inspection to each unique test
+  schema while exposing public vector types. This prevents public application data
+  from being mistaken for test migrations. Existing historical tests still pass.
+
+Verified on Python 3.11.9:
+
+- Default suite: 361 passed, 9 skipped. PostgreSQL/PGVector suite: 419 passed,
+  9 skipped. All nine skips are SQLite variants of tests requiring PostgreSQL
+  locks, durable checkpoints, or PGVector; PostgreSQL counterparts pass.
+- Actual PostgreSQL 16.15 / PGVector 0.8.6 cosine ranking, exact-match threshold,
+  top-k/character bounds, repository/base/profile isolation, and changed-path
+  exclusion passed. No Python substitute for vector search is claimed.
+- Atomic same-snapshot replacement, deleted-chunk cleanup, empty snapshots,
+  embedding and SQL-write failures, index/retrieval deadlines, concurrent writers,
+  and coverage changes during a concurrent reindex passed.
+- Provider wire-format, response order/index/count/dimensions, nonfinite/zero/
+  overflowing values, input budgets, retry/deferred-delay boundaries, and safe
+  malformed-response/permanent-failure handling passed with mocked HTTP.
+- A durable PostgreSQL checkpoint closed/reopened its connection and rebuilt the
+  graph after index removal; resume reused saved snippets without model/embedding
+  calls. Incompatible checkpoint mode/profile and out-of-diff findings are rejected.
+- Live Uvicorn `POST /repositories/index` against a loopback GitHub fixture returned
+  HTTP 200 and three stored chunks. Separate CLI processes paused/resumed/reused
+  review `00000000-0000-4000-8000-000000000008` with saved snippets from tests,
+  database code, and README. Review/findings/history GETs returned HTTP 200,
+  COMPLETED, four findings, score 7.7, REQUEST_CHANGES.
+- Alembic upgrade, downgrade/upgrade in isolated test schemas, and final
+  `alembic check` passed with no schema drift. Ruff lint/format passed (98 files),
+  CLI help checked, all 21 context-related settings matched Compose/example
+  defaults, duplicate reserved settings removed, and 72 packages were compatible.
+
+Verification used an owned workspace-local PostgreSQL/PGVector runtime and cluster
+under ignored `.venv`; it never used or modified the existing Windows PostgreSQL
+service. Temporary API/source servers and the database are stopped after checks.
+Docker builds and real provider/model accounts remain unverified. GitHub/provider
+network responses were mocked; no paid API calls or GitHub writes occurred.
+
+Retrieval uses exact cosine search over bounded snapshots, without HNSW/IVFFlat,
+semantic reranking, compiler-aware parsing, automatic reindexing, or pruning.
+Normalized fixture indexing trusts its caller's revision provenance. Manual review
+invocation and one caller per checkpoint thread remain required; queued jobs are
+not consumed yet. Semantic relevance does not establish correctness or call graphs.
+
+## Phase 8: Redis background processing and recovery
+
+Implemented:
+
+- `services/worker_queue.py`: validated bounded envelopes and atomic compare/claim
+  around the existing pending list; persistent token-owned processing receipts,
+  per-review leases, heartbeats, deferred retry structures, bounded maintenance,
+  expiry recovery, and terminal status/ACK. Full payloads and active attempt counts
+  survive expiring job/status display metadata. Script keys are explicit, with
+  type checks before mutation; deployment targets standalone Redis.
+- Token/envelope ownership checks prevent expired owners from renewing, deferring,
+  or acknowledging another receipt. Busy review heads rotate; stale lease scores
+  cannot reclaim a live owner. Malformed/binary envelopes are quarantined by digest,
+  including corruption in durable processing/retry structures. Dead letters are
+  bounded; valid failure records retain the job and a safe fixed error.
+- `worker/locks.py`: nonblocking PostgreSQL session advisory lock on a dedicated
+  autocommit connection. An old DB session still holding a review prevents a new
+  lease owner from running it concurrently. Contention does not spend attempts;
+  cancellation/cleanup releases or invalidates the connection.
+- `worker/processor.py`: production graph/resource wiring, strict job/checkpoint
+  identity checks, durable start/resume, canonical PostgreSQL terminal reuse,
+  failure persistence after ingestion, and ending aborted graph checkpoints.
+  Jobs failing before validated PR ingestion have Redis/dead-letter outcomes without
+  invented PostgreSQL PR/review rows.
+- `worker/runner.py`: independent heartbeat supervision, cancellation after lost
+  ownership, bounded execution retries/backoff, whole-workflow deadlines, safe
+  failures, retry exhaustion, partial/all-agent outcome preservation, and graceful
+  stop windows. Redis ACK occurs after final result persistence.
+- GitHub rate/deferred errors carry supported numeric Retry-After and primary
+  reset windows. Workers schedule them without sleeping while owning a receipt;
+  repeated rate failures back off and windows beyond seven days fail safely.
+- `services/pr_cache.py`: temporary normalized PR data scoped by API origin,
+  credential fingerprint, repository, PR number, and exact base/head SHAs. Cache
+  hits verify live SHAs and refresh PR metadata; corrupt/mismatched/oversized/
+  unavailable entries fall back to GitHub. Cached file data avoids repeat reads.
+  The graph accepts a structural PR-source protocol for cached/direct ingestion.
+- `GET /reviews/{id}/status`: queued/processing/terminal states, attempt counts,
+  safe error, and optional UTC next retry. Reads work before DB ingestion and
+  report safe Redis failures/expired status. Duplicate webhook responses retain
+  the current job status instead of always claiming QUEUED.
+- Resume recognizes an already committed FAILED review before restarting pending
+  model branches, covering failure-commit/checkpoint gaps. Worker canonical-result
+  checks cover successful final-commit/checkpoint/ACK gaps without duplicate findings.
+- `python -m app.worker` CLI, `--once`, `--mock`, retrieval mode flags, Windows
+  selector loop, structured logs, graceful signals, shared Compose configuration,
+  and a separate scalable worker service after healthy API/migration startup.
+- Eleven validated worker/cache settings, README and workflow/context guide
+  updates, and `docs/WORKER.md` with operation, ownership, retry, cache, status,
+  durability, and verification details. No new dependency or business migration;
+  Alembic remains at 0002 and graph checkpoint versions remain 1/2/3.
+
+Verified on Python 3.11.9:
+
+- Default suite: 413 passed, 12 skipped. With PostgreSQL/PGVector and Redis:
+  481 passed, 11 skipped. Service-enabled skips are SQLite variants of operations
+  requiring PostgreSQL locks/checkpoints/vector support; all PG counterparts pass.
+  The default run also skips the actual Redis script test.
+- Queue tests cover concurrent claims, active duplicates, stale-token rejection,
+  live-heartbeat protection, payload survival after metadata expiry, one-time retry
+  promotion, malformed/binary/corrupt envelope quarantine, and key-type safety.
+  Real Redis tests use isolated test key namespaces and never flush a database.
+- Worker tests cover commit/ACK reuse, safe retry exhaustion, stale PR failure,
+  contention, lost heartbeats, shutdown/cancellation, deadlines, rate-window
+  scheduling, and partial/all-agent outcome synchronization.
+- Actual PostgreSQL advisory locking blocked another owner and released after
+  cancellation. An actual durable checkpoint was reopened by a replacement worker
+  without repeating the four already checkpointed model calls.
+- Live separate API/worker processes consumed signed webhook deliveries using
+  PostgreSQL/PGVector, Redis 7.4.11 (Windows port), and loopback GitHub/model fixtures.
+  `/health` returned 200/healthy with all three dependencies up. Status progressed
+  QUEUED → PROCESSING → COMPLETED; review/findings reads returned four findings and
+  risk 7.7. Redelivery reused the completed ID/status without another queue entry.
+- Killed a worker with Security/Testing/Documentation pending writes already saved
+  and Quality still blocked. Restarted Redis from its real AOF data, waited for the
+  owned lease to expire, and started another worker. Only Quality reran. Cache reuse
+  limited the two deliveries to one PR-file fetch. Recovered status was COMPLETED,
+  attempts=2, findings=4, score=7.7; no processing receipts/leases remained.
+- CLI help and idle `--mock --once --diff-only` checked. All eleven worker/cache
+  defaults match `.env.example` and Compose; API and worker share environment.
+  `alembic check` reported no drift. Ruff lint/format and 72-package compatibility
+  checks passed; formatting covers 113 files.
+
+All runtime verification used owned local resources under ignored `.venv` and
+loopback endpoints. The existing Windows PostgreSQL service was never modified.
+Temporary API/source/model processes and Redis/PostgreSQL are stopped after checks.
+The Redis Windows artifact digest was verified against its release metadata.
+Container builds/Compose startup and real provider accounts remain unverified.
+No paid API calls, GitHub writes, or production queue/database operations occurred.
+
+This is at-least-once processing, not a distributed exactly-once/failover guarantee.
+Manual callers must not concurrently run worker-owned review IDs. Unfinished model
+work can repeat; cache data and display statuses expire while queue payloads remain.
+Indexing stays synchronous. Automatic dead-letter redrive/pruning, Redis Cluster,
+global provider quotas, throughput benchmarks, and GitHub publishing are not added.
+
 ## Next phase
 
-Phase 6 adds Quality, Testing, and Documentation Agents with distinct prompts and
-structured outputs, concurrent graph branches, shared findings, and partial-result
-aggregation when one reviewer fails. Preserve controlled provider/output retries,
-safe error data, checkpoint boundaries, and idempotent final persistence. PGVector
-retrieval and Redis worker processing remain Phases 7 and 8.
+Phase 9 publishes the final review as one readable Markdown comment on the PR,
+with stale-revision checks and controlled retry/idempotency behavior.

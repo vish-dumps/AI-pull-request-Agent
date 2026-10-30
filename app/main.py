@@ -6,6 +6,8 @@ from fastapi import FastAPI
 from redis.asyncio import Redis
 
 from app.api.routes.health import router as health_router
+from app.api.routes.jobs import router as jobs_router
+from app.api.routes.repositories import router as repositories_router
 from app.api.routes.reviews import router as reviews_router
 from app.api.routes.webhooks import router as webhooks_router
 from app.core.config import Settings, get_settings
@@ -42,11 +44,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application = FastAPI(
         title=settings.app_name,
         version="0.1.0",
-        description="AI pull request review agent. Phase 5: checkpointed LangGraph workflow.",
+        description="AI pull request review agent. Phase 8: reliable Redis background processing.",
         lifespan=lifespan,
     )
     application.include_router(health_router)
     application.include_router(reviews_router)
+    application.include_router(jobs_router)
+    application.include_router(repositories_router)
     application.include_router(webhooks_router)
     return application
 

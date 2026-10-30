@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
 
 from app.schemas.github import CommitSHA, PRNumber, RepositoryName
+from app.schemas.review import ReviewStatus
 
 PullRequestAction = Literal["opened", "synchronize", "reopened"]
 SUPPORTED_PR_ACTIONS = frozenset({"opened", "synchronize", "reopened"})
@@ -23,10 +24,18 @@ class ReviewJob(BaseModel):
 
 class WebhookAccepted(BaseModel):
     review_id: UUID
-    status: Literal["QUEUED"] = "QUEUED"
+    status: ReviewStatus = ReviewStatus.QUEUED
     duplicate: bool = False
 
 
 class WebhookIgnored(BaseModel):
     status: Literal["ignored"] = "ignored"
     reason: str
+
+
+class JobStatusRead(BaseModel):
+    review_id: UUID
+    status: ReviewStatus
+    attempts: int = Field(default=0, ge=0)
+    error: str | None = None
+    next_retry_at: datetime | None = None

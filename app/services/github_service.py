@@ -2,24 +2,45 @@ import asyncio
 import base64
 import binascii
 import logging
-from typing import TypeVar
+import math
+import re
+import time
+from typing import Protocol, TypeVar
 from urllib.parse import quote
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from app.core.config import Settings
-from app.core.exceptions import GitHubAPIError, GitHubRateLimitError, PullRequestChangedError
+from app.core.exceptions import (
+    GitHubAPIError,
+    GitHubFileUnsupportedError,
+    GitHubRateLimitError,
+    PullRequestChangedError,
+)
 from app.schemas.github import (
     ChangedFile,
+    CommitSHA,
     GitHubPullRequest,
     GitHubRepository,
+    GitTree,
     PullRequestContext,
     validate_repository,
 )
 
 logger = logging.getLogger(__name__)
 Model = TypeVar("Model", bound=BaseModel)
+
+
+class PullRequestSource(Protocol):
+    async def get_pull_request_context(
+        self,
+        repository: str,
+        pr_number: int,
+        *,
+        expected_head_sha: str | None = None,
+        expected_base_sha: str | None = None,
+    ) -> PullRequestContext: ...
 
 
 def build_github_client(
@@ -56,6 +77,26 @@ class GitHubService:
             raise ValueError("Pull request number must be a positive integer")
         return f"repos/{repository}/pulls/{pr_number}"
 
+    @staticmethod
+    def rate_limit_delay(response: httpx.Response) -> float:
+        delays = [60.0]
+        for header in ("retry-after", "x-ratelimit-reset"):
+            value = response.headers.get(header)
+            if value is None or (
+                header == "x-ratelimit-reset"
+                and response.headers.get("x-ratelimit-remaining") != "0"
+            ):
+                continue
+            try:
+                delay = float(value)
+                if header == "x-ratelimit-reset":
+                    delay -= time.time() - 1
+            except ValueError:
+                continue
+            if math.isfinite(delay) and delay >= 0:
+                delays.append(delay)
+        return max(delays)
+
     async def _request(self, method: str, path: str, **kwargs: object) -> httpx.Response:
         # GETs are safe to retry. A timed-out POST may already have created a comment.
         attempts = self.max_attempts if method == "GET" else 1
@@ -73,14 +114,20 @@ class GitHubService:
                         or "retry-after" in response.headers
                     )
                 ):
-                    # Leave long rate-limit waits to a future worker, never busy-retry.
+                    # Defer the entire job; never hold a worker sleeping for a rate window.
                     raise GitHubRateLimitError(
-                        "GitHub API rate limit reached", response.status_code
+                        "GitHub API rate limit reached",
+                        response.status_code,
+                        retry_after_seconds=self.rate_limit_delay(response),
                     )
                 if 200 <= response.status_code < 300:
                     return response
                 if response.status_code >= 500 and "retry-after" in response.headers:
-                    raise GitHubAPIError("GitHub requested a delayed retry", response.status_code)
+                    raise GitHubAPIError(
+                        "GitHub requested a delayed retry",
+                        response.status_code,
+                        retry_after_seconds=self.rate_limit_delay(response),
+                    )
                 if response.status_code < 500 or attempt + 1 == attempts:
                     raise GitHubAPIError("GitHub API request was rejected", response.status_code)
             logger.warning(
@@ -200,14 +247,51 @@ class GitHubService:
             or data.get("encoding") != "base64"
             or not isinstance(content, str)
         ):
-            raise GitHubAPIError("GitHub content is too large or has unsupported encoding")
+            raise GitHubFileUnsupportedError(
+                "GitHub content is too large or has unsupported encoding"
+            )
         try:
             decoded = base64.b64decode("".join(content.split()), validate=True)
             if len(decoded) > self.max_file_bytes:
-                raise GitHubAPIError("GitHub content exceeds the file size limit")
+                raise GitHubFileUnsupportedError("GitHub content exceeds the file size limit")
             return decoded.decode("utf-8")
         except (binascii.Error, UnicodeError):
-            raise GitHubAPIError("GitHub content is not a valid UTF-8 text file") from None
+            raise GitHubFileUnsupportedError(
+                "GitHub content is not a valid UTF-8 text file"
+            ) from None
+
+    async def resolve_repository_commit(
+        self, repository: str, ref: str | None = None
+    ) -> tuple[str, str]:
+        validate_repository(repository)
+        if ref is None:
+            metadata = await self.get_repository_metadata(repository)
+            ref = metadata.default_branch
+        if not ref or len(ref) > 200:
+            raise GitHubAPIError("Repository has no usable revision")
+        response = await self._request("GET", f"repos/{repository}/commits/{quote(ref, safe='')}")
+        data = self._json(response)
+        try:
+            sha = TypeAdapter(CommitSHA).validate_python(data["sha"])
+            tree_sha = TypeAdapter(CommitSHA).validate_python(data["commit"]["tree"]["sha"])
+        except (ValidationError, TypeError, KeyError):
+            raise GitHubAPIError("GitHub returned an invalid commit snapshot") from None
+        if re.fullmatch(r"[a-fA-F0-9]{40}", ref) and ref.lower() != sha.lower():
+            raise GitHubAPIError("GitHub returned a different commit revision")
+        return sha.lower(), tree_sha.lower()
+
+    async def get_repository_tree(self, repository: str, tree_sha: str) -> GitTree:
+        validate_repository(repository)
+        tree_sha = TypeAdapter(CommitSHA).validate_python(tree_sha)
+        response = await self._request(
+            "GET", f"repos/{repository}/git/trees/{tree_sha}", params={"recursive": "1"}
+        )
+        if len(response.content) > 10000000:
+            raise GitHubAPIError("GitHub tree exceeded the response size limit")
+        tree = self._parse(GitTree, self._json(response))
+        if tree.sha.lower() != tree_sha.lower():
+            raise GitHubAPIError("GitHub returned a different tree revision")
+        return tree
 
     async def post_review_comment(
         self, repository: str, pr_number: int, markdown: str

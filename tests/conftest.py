@@ -158,3 +158,21 @@ def security_job(security_context):
         base_sha=security_context.base_sha,
         head_sha=security_context.head_sha,
     )
+
+
+@pytest.fixture
+def multi_context():
+    sample = Path(__file__).resolve().parents[1] / "examples/multi_agent_pr.json"
+    return PullRequestContext.model_validate_json(sample.read_bytes())
+
+
+@pytest.fixture
+def multi_job(multi_context):
+    return ReviewJob(
+        delivery_id=uuid4(),
+        repository=multi_context.repository,
+        pr_number=multi_context.pr_number,
+        action="opened",
+        base_sha=multi_context.base_sha,
+        head_sha=multi_context.head_sha,
+    )

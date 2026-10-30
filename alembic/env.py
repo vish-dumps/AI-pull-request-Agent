@@ -14,7 +14,12 @@ if config.config_file_name is not None:
 
 
 def run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=Base.metadata, compare_type=True)
+    context.configure(
+        connection=connection,
+        target_metadata=Base.metadata,
+        compare_type=True,
+        version_table_schema=config.attributes.get("schema"),
+    )
     with context.begin_transaction():
         context.run_migrations()
 

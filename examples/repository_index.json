@@ -1,0 +1,10 @@
+{
+  "repository": "demo/multi-agent-review",
+  "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "files": {
+    "src/db.py": "def find_user(connection, username):\n    # Bind username separately from the SQL query.\n    query = 'SELECT * FROM users WHERE name = ?'\n    return connection.execute(query, (username,)).fetchone()\n",
+    "tests/test_service.py": "def test_load_user_requires_id():\n    # Existing repository example for the user_id validation contract.\n    with pytest.raises(ValueError):\n        load_user(user_id='')\n",
+    "README.md": "# User service\n\nThe service loads a user by user_id. Database queries must use bound SQL parameters.\nTimeout values are integer seconds. Retry counts should remain bounded.\n",
+    "node_modules/ignored.js": "This dependency must not be indexed."
+  }
+}

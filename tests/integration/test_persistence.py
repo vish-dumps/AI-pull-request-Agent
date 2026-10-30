@@ -25,19 +25,25 @@ async def counts(sessions):
 
 def test_migrations_match_models_and_round_trip(database):
     def check(connection):
+        schema = database.schema if database.backend == "postgresql" else None
         context = MigrationContext.configure(connection, opts={"compare_type": True})
         assert compare_metadata(context, Base.metadata) == []
-        assert set(inspect(connection).get_table_names()) == {
+        assert set(inspect(connection).get_table_names(schema=schema)) == {
             "alembic_version",
             "repositories",
             "pull_requests",
             "reviews",
             "findings",
+            "repository_indexes",
+            "repository_chunks",
         }
         config = Config("alembic.ini")
         config.attributes["connection"] = connection
+        config.attributes["schema"] = schema
         command.downgrade(config, "base")
-        assert inspect(connection).get_table_names() == ["alembic_version"]
+        # Explicit schema inspection excludes tables visible through public after
+        # the test's tables have been dropped.
+        assert inspect(connection).get_table_names(schema=schema) == ["alembic_version"]
         command.upgrade(config, "head")
         assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []
 

@@ -34,6 +34,11 @@ class LLMProvider(Protocol):
 class MockLLMProvider:
     async def generate(self, request: LLMRequest) -> str:
         payload = json.loads(request.user_prompt)
+        category = request.schema_name.removesuffix("_review")
+        if category not in {"security", "quality", "testing", "documentation"}:
+            raise LLMProviderError("Mock provider does not recognize the reviewer schema")
+        if category != "security":
+            return self._specialized_demo(category, payload)
         matches_demo = any(
             file["filename"] == MOCK_FILE and MOCK_EVIDENCE in file["patch"]
             for file in payload["changed_files"]
@@ -58,6 +63,57 @@ class MockLLMProvider:
                 "findings": findings,
                 "summary": "Mock mode: predefined security response; no model was called.",
                 "risk_score": 70 if findings else 0,
+            }
+        )
+
+    @staticmethod
+    def _specialized_demo(category: str, payload: dict[str, Any]) -> str:
+        fixtures = {
+            "quality": {
+                "evidence": "retries = [value for value in range(1000000)]",
+                "severity": "MEDIUM",
+                "title": "Mock example: avoid a million-item allocation",
+                "description": "The function eagerly builds a million-item list on each call.",
+                "suggestion": "Use a retry count or a lazy iterator if callers need iteration.",
+            },
+            "testing": {
+                "evidence": 'raise ValueError("user_id is required")',
+                "severity": "LOW",
+                "title": "Mock example: cover the empty user-id branch",
+                "description": "No empty-user-id failure coverage is shown in this fixture.",
+                "suggestion": "Assert load_user('') raises ValueError with the expected message.",
+            },
+            "documentation": {
+                "evidence": 'os.getenv("REVIEW_TIMEOUT", "30")',
+                "severity": "LOW",
+                "title": "Mock example: document REVIEW_TIMEOUT",
+                "description": "The fixture adds a timeout setting without showing documentation.",
+                "suggestion": "Document integer format, default 30, and invalid-value behavior.",
+            },
+        }
+        fixture = fixtures[category]
+        matches = any(
+            file["filename"] == "src/service.py" and fixture["evidence"] in file["patch"]
+            for file in payload["changed_files"]
+        )
+        findings = (
+            [
+                {
+                    "agent_type": category,
+                    "file_path": "src/service.py",
+                    "line_number": None,
+                    "confidence": 0.8,
+                    **fixture,
+                }
+            ]
+            if matches
+            else []
+        )
+        return json.dumps(
+            {
+                "findings": findings,
+                "risk_score": 20 if matches else 0,
+                "summary": f"Mock mode: predefined {category} response; no model was called.",
             }
         )
 
