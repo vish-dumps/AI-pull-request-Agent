@@ -1,6 +1,4 @@
 import asyncio
-import hashlib
-import hmac
 import json
 import os
 from contextlib import asynccontextmanager
@@ -32,28 +30,7 @@ from app.services.worker_queue import DEAD, DELAYED, LEASES, PROCESSING, WorkerQ
 from app.worker.locks import review_lock
 from app.worker.processor import WorkflowProcessor
 from app.worker.runner import ReviewWorker
-
-
-def pr_payload(context):
-    return {
-        "number": context.pr_number,
-        "title": context.title,
-        "body": context.description,
-        "user": {"login": context.author},
-        "base": {
-            "ref": context.base_branch,
-            "sha": context.base_sha,
-            "repo": {"full_name": context.repository},
-        },
-        "head": {
-            "ref": context.head_branch,
-            "sha": context.head_sha,
-            "repo": {"full_name": context.head_repository or context.repository},
-        },
-        "additions": context.total_additions,
-        "deletions": context.total_deletions,
-        "changed_files": context.total_changed_files,
-    }
+from tests.support.github import pr_payload, webhook_headers
 
 
 def github_transport(context, calls):
@@ -101,13 +78,7 @@ def test_signed_webhook_runs_to_persisted_review_and_status_api(
             }
         ).encode()
         delivery = str(uuid4())
-        headers = {
-            "Content-Type": "application/json",
-            "X-GitHub-Event": "pull_request",
-            "X-GitHub-Delivery": delivery,
-            "X-Hub-Signature-256": "sha256="
-            + hmac.new(b"test-webhook-secret", body, hashlib.sha256).hexdigest(),
-        }
+        headers = webhook_headers(body, delivery=delivery)
         accepted = client.post("/webhooks/github", content=body, headers=headers)
         assert accepted.status_code == 202
         review_id = accepted.json()["review_id"]

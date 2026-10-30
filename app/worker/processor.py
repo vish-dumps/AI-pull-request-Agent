@@ -11,10 +11,12 @@ from app.db.repositories import ReviewRepository
 from app.graph.checkpoints import open_postgres_checkpointer
 from app.graph.workflow import ReviewWorkflow
 from app.schemas.jobs import ReviewJob
+from app.schemas.publication import PublicationRead
 from app.schemas.review import ReviewStatus
 from app.services.context_service import ContextService
 from app.services.github_service import PullRequestSource
 from app.services.llm_service import LLMProvider
+from app.services.publication_service import ReviewPublisher
 from app.services.worker_queue import TERMINAL
 from app.worker.locks import review_lock
 
@@ -29,10 +31,19 @@ class WorkflowProcessor:
         github: PullRequestSource,
         context_service: ContextService | None = None,
         checkpointers: Callable[[], AbstractAsyncContextManager[BaseCheckpointSaver]] | None = None,
+        publisher: ReviewPublisher | None = None,
     ) -> None:
         self.engine, self.sessions, self.settings = engine, sessions, settings
         self.provider, self.github, self.context_service = provider, github, context_service
         self.checkpointers = checkpointers or (lambda: open_postgres_checkpointer(settings))
+        self.publisher = publisher
+
+    async def finalize(self, job: ReviewJob) -> PublicationRead | None:
+        return (
+            await self.publisher.publish_owned(job.review_id)
+            if self.publisher is not None
+            else None
+        )
 
     def lock(self, job: ReviewJob) -> AbstractAsyncContextManager[bool]:
         return review_lock(self.engine, job.review_id)

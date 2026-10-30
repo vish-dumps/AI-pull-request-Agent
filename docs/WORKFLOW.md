@@ -1,4 +1,4 @@
-# Phase 8 workflow
+# Phase 9 workflow
 
 The application now has one review graph. The Phase 4 persistence service delegates
 to it; standalone agent-only validation remains available through the earlier CLI.
@@ -50,8 +50,10 @@ All four successful reviewers with full supplied diff coverage produce `COMPLETE
 Any failed/omitted reviewer or coverage warning produces `PARTIAL`, preserving
 successful findings. All reviewers failing produces `FAILED` with safe errors and
 no synthetic successful review. A zero-finding partial review cannot approve.
-No GitHub comment is posted. The graph itself does not consume Redis; the separate
-[worker](WORKER.md) claims jobs, owns execution, and acknowledges terminal results.
+The graph itself persists analysis and does not consume Redis. The separate
+[worker](WORKER.md) claims jobs, owns execution, optionally [publishes](PUBLISHING.md)
+the saved review, and then acknowledges the result. Publication retries have their
+own durable lifecycle and do not rerun completed model work.
 
 ## Checkpoints
 
@@ -77,7 +79,7 @@ on resume even if the live index has changed or been removed.
 The checkpointer uses autocommit, dictionary rows, strict serializer allowlists,
 and no pickle fallback. Its `setup()` creates/upgrades its own tables. Alembic
 continues to manage only application tables, so a checkpoint library upgrade is
-not implemented by editing business migrations. Current application revision is 0002.
+not implemented by editing business migrations. Current application revision is 0003.
 
 SQLAlchemy business transactions use asyncpg. The official checkpointer uses
 Psycopg 3, which needs a selector event loop on Windows; the workflow CLI selects

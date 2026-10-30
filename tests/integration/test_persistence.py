@@ -36,6 +36,7 @@ def test_migrations_match_models_and_round_trip(database):
             "findings",
             "repository_indexes",
             "repository_chunks",
+            "review_publications",
         }
         config = Config("alembic.ini")
         config.attributes["connection"] = connection

@@ -76,12 +76,12 @@ def test_transient_database_ingestion_retries_once_without_duplicating_stages(
     original = ReviewRepository.create_review
     attempts = 0
 
-    async def flaky(store, job, context):
+    async def flaky(store, job, context, **kwargs):
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise OperationalError("SELECT", {}, Exception("private-database-details"))
-        return await original(store, job, context)
+        return await original(store, job, context, **kwargs)
 
     monkeypatch.setattr(ReviewRepository, "create_review", flaky)
 

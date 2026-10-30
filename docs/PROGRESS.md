@@ -490,7 +490,149 @@ work can repeat; cache data and display statuses expire while queue payloads rem
 Indexing stays synchronous. Automatic dead-letter redrive/pruning, Redis Cluster,
 global provider quotas, throughput benchmarks, and GitHub publishing are not added.
 
+## Phase 9: guarded GitHub Markdown publication
+
+Implemented:
+
+- `services/comment_renderer.py`: deterministic human-facing Markdown with four
+  reviewer sections, stored risk/recommendation, reviewed head SHA, finding locations,
+  descriptions, concrete suggestions, summary, and a stable hidden review marker.
+  Partial/empty results and demos remain explicit. Markdown/HTML/mentions/control
+  characters are neutralized, byte/finding caps are enforced, and omitted findings
+  cannot turn a section into a false clean report. No checkpoint/prompt/embedding
+  state or raw evidence payload is rendered.
+- Migration `0003`: nullable persisted review mock mode and `review_publications`,
+  keyed one-to-one to the review with cascade cleanup, count/outcome constraints,
+  frozen Markdown, destination/author binding, send intent, attempts, comment ID,
+  safe error/retry metadata, and timestamps. Legacy modes remain unknown. New graph
+  ingestion persists real/mock mode. No new dependency or graph topology/version.
+- GitHub boundary adds strict authenticated-user lookup and bounded comment scans.
+  Pagination stays on constructed trusted paths. Only exact frozen bodies authored
+  by the verified numeric user ID count as recovered comments; spoofed markers do
+  not. PR snapshots include open/closed/merged metadata.
+- `services/publication_service.py`: explicit enable/token configuration; mock and
+  legacy-unknown suppression by default; immutable publication bodies; repeated
+  base/head/open/target checks; persisted SENDING intent before network I/O; and
+  separate terminal outcomes independent of analysis status.
+- Safe reads/definitive rate-limit rejections have bounded scheduled retries.
+  Transport/server/malformed-success/cancellation outcomes after write intent
+  become UNCERTAIN. Resumed SENDING/UNCERTAIN attempts reconcile read-only and
+  never blindly repost. Author/origin mismatches and incomplete scans stop writes.
+  Publication has a whole-round deadline and a bounded DB-only recovery window.
+- Worker finalization publishes after a saved COMPLETED/PARTIAL review and before
+  ACK. Publication retries reuse the canonical review without incrementing analysis
+  execution/model counts. Publishing errors do not erase successful analysis.
+  The same PostgreSQL review lock coordinates worker and explicit publishing CLI.
+- Read-only `GET /reviews/{id}/comment` and `/publication` expose concrete Markdown
+  previews/frozen bodies and independent publication outcomes. They do not call
+  GitHub or create publication records.
+- `scripts/publish_review.py`: saved-review preview by default, free infrastructure-
+  independent `--demo`, explicit configured `--publish`, and read-only reconciliation
+  of uncertain attempts. Windows redirected output uses UTF-8. Added the labeled
+  `examples/review_comment.md` artifact, README updates, and `docs/PUBLISHING.md`.
+- Eight publishing settings are active in `.env.example` and the shared API/worker
+  Compose environment. Publishing defaults off; deliberate mock/unknown legacy
+  publishing requires an additional opt-in.
+
+Verified on Python 3.11.9:
+
+- Default suite: 455 passed, 12 skipped. With PostgreSQL 16.15 / PGVector 0.8.6 and
+  Redis 7.4.11: 547 passed, 11 skipped. Service-enabled skips are SQLite variants
+  whose PostgreSQL counterparts pass; the default run also skips real Redis.
+- Formatter tests cover sections, severity/location/suggestions, deterministic
+  marker, complete/partial/no-findings behavior, mock labels, hostile formatting,
+  and multibyte byte/finding limits. Unfinished/failed reviews cannot render as
+  successful clean analysis.
+- Publication integration tests run with actual migrated SQLite and PostgreSQL:
+  one-time publication/reuse, moved/closed PRs, changes immediately before write,
+  demo/legacy suppression, explicit labeled demos, history limits, safe rejection
+  retry windows, permanent failures, author/origin/spoof checks, and API previews.
+- Lost response, server error after creation, malformed success, cancellation,
+  actual controlled deadline expiry, and POST-success-before-record failure retain
+  ambiguity and reconcile without another POST. Successful analysis stays intact.
+- Worker publication retry tests persist the review first, schedule a rate retry,
+  and complete publication with four total reviewer calls and one actual created
+  comment. Unexpected publication infrastructure errors preserve recoverable
+  receipts instead of failing the analysis.
+- Separate live API/worker/CLI processes used actual PostgreSQL/Redis and loopback
+  GitHub/model fixtures. A signed webhook created one Markdown comment; previews,
+  terminal reuse, and redelivery caused no extra write. A second created comment
+  with a dropped POST response became UNCERTAIN, then explicit reconciliation
+  recorded it PUBLISHED with no extra POST/model calls. A third mock-mode review
+  completed analysis and was SKIPPED for publication. Totals: two fixture comments,
+  eight model-fixture requests. No real GitHub comment or paid API call occurred.
+- Free `--demo`, saved preview/explicit reuse CLI, healthy HTTP readiness, and new
+  publication endpoints checked. Generated the sample Markdown artifact.
+- Alembic upgrade to 0003, isolated downgrade/upgrade, and `alembic check` passed
+  without drift. Ruff lint/format passed (124 files), all eight publication defaults
+  match Compose/example configuration, and 72 packages remain compatible.
+
+Verification used owned loopback resources and ignored `.venv` artifacts; the
+existing Windows PostgreSQL service was untouched. Temporary API/source/model
+processes and Redis/PostgreSQL are stopped after checks. Docker/Compose startup,
+real GitHub token/account behavior, and paid providers remain unverified.
+
+Publishing creates one comment per saved review, preserving other comments.
+PUBLISHED/SKIPPED/FAILED outcomes remain final. A crash before a POST actually
+starts can still leave durable SENDING intent; the conservative recovery may need
+operator investigation instead of creating a potentially duplicate comment.
+GitHub issue-comment creation has no atomic commit-conditional guard, so a PR can
+move after the final snapshot check. GitHub App installation tokens without `/user`,
+force reposts, automatic comment updates/deletion, and failover exactly-once writes
+are not implemented.
+
+## Phase 10: consolidated automated verification
+
+Implemented:
+
+- Shared migrated database fixture under `tests/support/database.py`, available
+  to integration and end-to-end tests. Shared PR payload/signature helpers replace
+  duplicate implementations. Existing earlier-phase tests are retained.
+- Root test isolation clears inherited application settings, implicit dotenv
+  loading, cached settings, and tracing before collection and each test. Native
+  sync/async HTTPX calls fail immediately unless a fixture transport is injected.
+  Added checks for implicit dotenv isolation and both blocked transport modes.
+- Strict `unit`, `integration`, `e2e`, and `services` markers. The new
+  `scripts/test_suite.py` runs lint, formatting, and pytest, supports individual
+  layers, defaults to no services, and requires both test URLs for service mode.
+- Ten end-to-end scenarios run the signed FastAPI webhook, production queue Lua,
+  worker, GitHub and compatible-model HTTP adapters, all actual reviewers,
+  aggregation, migrated persistence, publishing, and final read/status APIs.
+  Only remote HTTP responses are fixtures. SQLite uses in-memory checkpoints
+  and a test lock substitute; PostgreSQL uses durable checkpoints and real locks.
+- Outcomes include complete findings/clean approval, one repaired output, one
+  failed reviewer, missing patches, all-failed analysis, stale revisions,
+  publication rate retries, lost-response reconciliation, and receipt recovery
+  after publishing but before ACK. Recovery asserts no repeated analysis or
+  duplicate comment. Signatures, read APIs, deduplication, persisted counts, and
+  the deterministic 7.7 score are checked along the complete delivery path.
+- Real Redis variants use unique namespaces, with cleanup restricted to their own
+  keys. The full database × queue matrix runs 40 end-to-end cases. Vector context
+  remains covered by the existing repository-context/checkpoint integration tests;
+  the delivery scenarios explicitly use diff-only context.
+- Added [TESTING.md](TESTING.md) with commands, requirement coverage, isolation
+  boundaries, resource ownership, expected skips, and verification limits. Updated
+  README and phase tracking. No application behavior or API protocol changed.
+
+Verified on Python 3.11.9:
+
+- Default runner: **468 passed, 12 skipped**.
+- PostgreSQL 16.15 / PGVector 0.8.6 and Redis 7.4.11 runner:
+  **590 passed, 11 skipped**. SQLite capability skips have passing PostgreSQL
+  counterparts; the default run additionally skips the real Redis queue test.
+- Ruff lint/format and dependency compatibility checks passed. Service mode rejects
+  missing URL configuration before checks. Test settings are isolated from inherited
+  application environment values. The default runner passed with deliberately
+  invalid inherited database/log settings and service URLs, plus publishing enabled
+  in the parent environment. All 72 installed packages remain compatible.
+
+All remote HTTP remained mocked; no GitHub account or paid model was used. Actual
+service verification used owned loopback resources, which were stopped afterward;
+the existing Windows PostgreSQL service was untouched. Docker deployment and
+real-provider/account behavior remain unverified. No coverage percentage or
+benchmark result is inferred from the passing functional suite.
+
 ## Next phase
 
-Phase 9 publishes the final review as one readable Markdown comment on the PR,
-with stale-revision checks and controlled retry/idempotency behavior.
+Phase 11 remains: consolidate structured logging, retries, large-PR behavior,
+architecture/demo documentation, and simulated-load verification.

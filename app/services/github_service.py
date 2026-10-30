@@ -13,6 +13,7 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from app.core.config import Settings
 from app.core.exceptions import (
+    CommentHistoryIncompleteError,
     GitHubAPIError,
     GitHubFileUnsupportedError,
     GitHubRateLimitError,
@@ -21,6 +22,8 @@ from app.core.exceptions import (
 from app.schemas.github import (
     ChangedFile,
     CommitSHA,
+    GitHubCommentAuthor,
+    GitHubIssueComment,
     GitHubPullRequest,
     GitHubRepository,
     GitTree,
@@ -306,3 +309,36 @@ class GitHubService:
         if not isinstance(data, dict) or type(data.get("id")) is not int:
             raise GitHubAPIError("GitHub returned an invalid comment response")
         return data
+
+    async def get_authenticated_user(self) -> GitHubCommentAuthor:
+        response = await self._request("GET", "user")
+        return self._parse(GitHubCommentAuthor, self._json(response))
+
+    async def find_review_comment(
+        self, repository: str, pr_number: int, body: str, author_id: int, *, max_pages: int
+    ) -> GitHubIssueComment | None:
+        self._pr_path(repository, pr_number)
+        for page in range(1, max_pages + 1):
+            response = await self._request(
+                "GET",
+                f"repos/{repository}/issues/{pr_number}/comments",
+                params={"per_page": 100, "page": page},
+            )
+            if len(response.content) > 8000000:
+                raise CommentHistoryIncompleteError(
+                    "Comment history response exceeded its size limit"
+                )
+            data = self._json(response)
+            if not isinstance(data, list) or len(data) > 100:
+                raise GitHubAPIError("GitHub returned an invalid comment list")
+            for item in data:
+                comment = self._parse(GitHubIssueComment, item)
+                if (
+                    comment.user is not None
+                    and comment.user.id == author_id
+                    and comment.body == body
+                ):
+                    return comment
+            if "next" not in response.links:
+                return None
+        raise CommentHistoryIncompleteError("Comment history scan exceeded the page limit")

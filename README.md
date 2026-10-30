@@ -4,7 +4,7 @@ An automated GitHub pull request reviewer being built incrementally with FastAPI
 LangGraph, specialized AI agents, PostgreSQL/PGVector, and Redis. The goal is a small,
 understandable portfolio project with a working demo and defensible engineering choices.
 
-**Current implementation: Phase 8 — Redis background processing and recovery.** Security,
+**Current implementation: Phase 10 — consolidated automated verification.** Security,
 Quality, Testing, and Documentation Agents run in parallel between context preparation
 and deterministic aggregation. Failed reviewers preserve successful results as a
 partial review. Optional context retrieval supplies bounded related snippets from
@@ -13,7 +13,11 @@ in-memory checkpoints; persisted workflows use PostgreSQL checkpoints and can
 resume in another process. Signed webhooks, Redis acceptance, Alembic persistence,
 and read APIs remain available. A separate worker now consumes accepted webhooks,
 tracks status, caches revision-specific PR data, and resumes interrupted work.
-GitHub publishing arrives in Phase 9.
+Opt-in publishing adds one readable comment per saved review, durable write tracking,
+revision checks, and read-only recovery of ambiguous writes. Publishing is disabled
+by default, and mock/unknown legacy reviews are excluded by default.
+The test suite now verifies signed deliveries through final comments with mocked
+HTTP services, plus an opt-in PostgreSQL/PGVector and Redis matrix.
 The original requirements are preserved in [docs/PRD.md](docs/PRD.md).
 
 ## Architecture
@@ -83,11 +87,11 @@ flowchart LR
 ```
 
 All four reviewers run by default. Context preparation reports `diff_only` or
-`pgvector` when retrieval is enabled. The final node persists a result; publishing
-to GitHub remains Phase 9. See [the workflow guide](docs/WORKFLOW.md) for state,
+`pgvector` when retrieval is enabled. The final graph node persists a result; the
+worker optionally publishes it before acknowledgement. See [the workflow guide](docs/WORKFLOW.md) for state,
 failure, transaction, and recovery details.
 
-Target end-to-end flow; GitHub publishing remains Phase 9:
+Implemented end-to-end flow, with context retrieval and publishing enabled by configuration:
 
 ```mermaid
 flowchart TD
@@ -118,6 +122,7 @@ app/
   api/routes/webhooks.py  # Bounded body, signature validation, quick job acceptance
   api/routes/reviews.py   # Stored review, findings, and repository-history reads
   api/routes/jobs.py      # Redis status, attempts, safe errors, retry scheduling
+  api/routes/publications.py # Read-only Markdown preview and publication status
   api/routes/repositories.py # Bounded revision-pinned repository indexing
   core/config.py          # Environment and .env configuration
   core/logging.py         # JSON application logs
@@ -141,6 +146,8 @@ app/
   services/job_queue.py   # Atomic delivery deduplication and enqueue
   services/worker_queue.py # Token-owned receipts, leases, delayed retry, recovery, ACK
   services/pr_cache.py    # Revision/credential-scoped temporary PR context
+  services/comment_renderer.py # Bounded human-readable review Markdown
+  services/publication_service.py # Durable outgoing intent, revision checks, reconciliation
   worker/                # Separate worker CLI, workflow processing, PostgreSQL ownership
   services/llm_service.py # Provider protocol, compatible HTTP adapter, mock provider
   services/review_service.py # Single-agent persistence and deterministic risk
@@ -157,12 +164,15 @@ scripts/seed_demo.py      # Persist a labeled synthetic review without an LLM
 scripts/review_security.py # Run the Security Agent, optionally persist its result
 scripts/review_workflow.py # Run, pause, or resume the checkpointed workflow
 scripts/index_repository.py # Index GitHub source or a normalized source fixture
+scripts/test_suite.py     # Lint, formatting, tests; optional service matrix
 alembic/                  # Async migration environment and versioned schema
 alembic.ini
 tests/
-  conftest.py             # Mocked database and Redis resources
+  conftest.py             # Configuration/HTTP isolation and shared fixtures
+  support/                # Migrated databases and signed GitHub fixture helpers
   unit/                   # Config, health, signatures, schemas, GitHub client, queue
   integration/            # Signed webhook to Redis; queued job to mocked GitHub context
+  e2e/                    # Signed delivery through final published fixture comment
 Dockerfile
 docker-compose.yml
 .env.example
@@ -293,6 +303,9 @@ Without infrastructure, the API still starts and `/health` correctly returns 503
 | `WORKER_LEASE_SECONDS` | `30` | Receipt ownership, renewed every third of this interval |
 | `WORKER_JOB_TIMEOUT_SECONDS` | `600` | Whole workflow execution deadline |
 | `PR_CACHE_TTL_SECONDS` / `PR_CACHE_MAX_BYTES` | `300` / `500000` | Temporary revision-scoped PR context cache |
+| `GITHUB_PUBLISH_ENABLED` | `false` | Explicitly enable GitHub comment writes |
+| `GITHUB_PUBLISH_MOCK_REVIEWS` | `false` | Permit deliberate mock/unknown legacy review publication |
+| `GITHUB_PUBLISH_MAX_ATTEMPTS` / `GITHUB_PUBLISH_TIMEOUT_SECONDS` | `3` / `60` | Safe automatic rounds and whole-publication deadline |
 
 Environment variables override `.env`. Compose supplies service hostnames `postgres`
 and `redis`; host Python uses `localhost`. Embedding, indexing, and retrieval settings
@@ -300,6 +313,8 @@ are active; see [the complete context limits](docs/CONTEXT.md). Neither model no
 embedding configuration causes the webhook handler to run external analysis.
 See [worker configuration](docs/WORKER.md) for polling, shutdown, Redis deadlines,
 maintenance/dead-letter bounds, and recovery behavior.
+Publication permissions, body/history limits, and unknown-write recovery are
+documented in [the publishing guide](docs/PUBLISHING.md).
 Keep secrets in an untracked `.env`; never commit real tokens.
 
 ## API endpoints
@@ -310,6 +325,8 @@ Keep secrets in an untracked `.env`; never commit real tokens.
 | POST | `/webhooks/github` | Verify a signed delivery, enqueue supported PR events, return 202 |
 | POST | `/repositories/index` | Index selected source at a resolved commit; bounded synchronous HTTP 200 with counts/coverage |
 | GET | `/reviews/{review_id}/status` | Redis job status, attempts, safe error and retry time; 404 if unknown/expired |
+| GET | `/reviews/{review_id}/comment` | Read-only Markdown preview of a completed/partial review |
+| GET | `/reviews/{review_id}/publication` | Durable publication outcome, attempts, comment ID and safe reason |
 | GET | `/reviews/{review_id}` | Stored review and findings; 404 if not persisted |
 | GET | `/reviews/{review_id}/findings` | Findings for a stored review; 404 for unknown review |
 | GET | `/repositories/{owner}/{repository}/reviews` | Case-insensitive history, `limit=20` (1–100), `offset=0` |
@@ -326,6 +343,7 @@ erDiagram
     REPOSITORIES ||--o{ PULL_REQUESTS : contains
     PULL_REQUESTS ||--o{ REVIEWS : receives
     REVIEWS ||--o{ FINDINGS : contains
+    REVIEWS ||--o| REVIEW_PUBLICATIONS : publishes
     REPOSITORY_INDEXES ||--o{ REPOSITORY_CHUNKS : contains
     REPOSITORIES {
         uuid id PK
@@ -349,6 +367,7 @@ erDiagram
         string status
         string base_sha
         string head_sha
+        bool mock_mode
         string risk
         float risk_score
         string summary
@@ -382,6 +401,18 @@ erDiagram
         int end_line
         text content
         vector embedding
+    }
+    REVIEW_PUBLICATIONS {
+        uuid review_id PK
+        string status
+        text body
+        string destination_hash
+        bigint author_id
+        bigint comment_id
+        int attempts
+        int post_attempts
+        datetime next_retry_at
+        datetime published_at
     }
 ```
 
@@ -421,6 +452,9 @@ isolate repository, commit SHA, and embedding profile. Index replacement is atom
 and source/embedding I/O takes place outside database transactions. Retrieval uses
 exact PGVector cosine search within the matching PR base snapshot. The migration
 enables the extension when necessary; its binaries must be installed on the server.
+Migration `0003` records review execution mode and adds the publication outbox.
+Legacy modes remain unknown. Publishing has a separate lifecycle from analysis;
+GitHub failures cannot erase a completed review.
 
 ## Phase 3 persistence demo
 
@@ -651,7 +685,7 @@ with zero findings can recommend `APPROVE`. A barrier waits for every branch bef
 aggregation. Successfully saved sibling outputs survive interruption and are reused
 when a pending reviewer resumes.
 
-Business tables are under Alembic revision `0002`. The official PostgreSQL
+Business tables are under Alembic revision `0003`. The official PostgreSQL
 checkpointer manages its own internal tables in the separate `review_workflow`
 schema, initialized by its `setup()` method. This keeps them outside business
 schema autogeneration. The configured database role must be allowed to create the
@@ -709,7 +743,7 @@ enqueueing and will fail ingestion when its revision cannot be verified.
 Use `--once` for one maintenance/claim pass and at most one job. Add `--with-context`
 for indexed base-commit retrieval, or `--diff-only` to disable it. Ctrl+C/SIGTERM
 stops claims, gives in-flight work a grace period, then leaves checkpoints/receipts
-for recovery. No GitHub comment is posted.
+for recovery. Publishing is off by default; Phase 9 can enable it explicitly.
 
 ```powershell
 Invoke-RestMethod http://localhost:8000/reviews/REVIEW_UUID/status
@@ -722,7 +756,39 @@ ingestion can be FAILED in Redis without a fabricated PostgreSQL review. Final
 PostgreSQL results are reused when a final checkpoint or Redis ACK was interrupted.
 Payloads in pending/processing/delayed structures survive expiring display metadata.
 See [the worker guide](docs/WORKER.md) for ownership, retries, cache behavior,
-dead letters, limits, and verification. Business migration remains `0002`.
+dead letters, limits, and verification. Business migration is now `0003`.
+
+## Phase 9 GitHub comments
+
+Preview the labeled fixture without services or paid calls:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/publish_review.py --demo
+```
+
+See [the example comment](examples/review_comment.md). Preview a persisted review
+with `scripts/publish_review.py REVIEW_UUID` or `GET /reviews/REVIEW_UUID/comment`.
+These previews perform no GitHub writes.
+
+To enable the worker's publisher, set `GITHUB_PUBLISH_ENABLED=true` and configure
+a GitHub token supporting `/user` with Pull requests read/write access. Keep
+`GITHUB_PUBLISH_MOCK_REVIEWS=false` for normal operation. New reviews record their
+real/mock mode; unknown legacy modes are skipped by default.
+
+```powershell
+.\.venv\Scripts\python.exe scripts/publish_review.py REVIEW_UUID --publish
+Invoke-RestMethod http://localhost:8000/reviews/REVIEW_UUID/publication
+```
+
+The explicit publish command also requires the configuration flag/token and the
+review ownership lock. The worker checks the current base/head SHAs and open PR
+state immediately before writing. Frozen bodies and authenticated-author matching
+reconcile uncertain writes. A timed-out POST is never blindly repeated; an absent
+ambiguous comment remains UNCERTAIN for operator investigation. Publishing failure
+leaves the saved review intact and has a separate outcome/retry budget.
+
+See [publishing](docs/PUBLISHING.md) for permissions, limits, statuses, reconciliation,
+and the remaining small race between GitHub's revision check and comment creation.
 
 ## Phase 2 webhook demo
 
@@ -802,7 +868,8 @@ jobs, run agents, or publish a comment. The sample webhook's commit SHAs are
 fictional, so use a real PR for this command. Public PR reads can be unauthenticated;
 private repositories need a token with repository access and Pull requests read
 permission. File-content retrieval also needs Contents read permission. The comment
-method requires write permission and is implemented but not called automatically.
+method requires write permission. The opt-in Phase 9 publisher calls it after a
+successful/partial review is saved; this fetch command itself remains read-only.
 
 `PullRequestContext` includes repository, PR number/title/description/author,
 base/head branch and SHA, fork repository, changed files, patches, additions,
@@ -829,6 +896,12 @@ After installing the development dependencies:
 .\.venv\Scripts\python.exe -m ruff check .
 .\.venv\Scripts\python.exe -m ruff format --check .
 ```
+
+Or run all three checks with `.\.venv\Scripts\python.exe scripts/test_suite.py`.
+This defaults to local SQLite and simulated Redis even if service-test URLs are
+inherited. See [docs/TESTING.md](docs/TESTING.md) for layer selection, service opt-in,
+the requirement matrix, and test isolation. Native HTTPX requests are blocked in
+pytest; application settings and implicit `.env` files are isolated from tests.
 
 Tests cover configuration, health, signatures, payload validation, atomic enqueue,
 delivery deduplication, metadata expiry, concurrent redelivery, queue outages and
@@ -858,8 +931,8 @@ creates a unique `test_<uuid>` schema, applies migrations there, and removes onl
 that schema during cleanup. Existing application tables are not used. PostgreSQL
 also verifies concurrent duplicate ingestion; that specific case is skipped on SQLite.
 
-Phase 8 local verification on Python 3.11.9: **413 passed, 12 skipped** without
-external services; **481 passed, 11 skipped** with PostgreSQL 16.15 / PGVector 0.8.6
+Phase 10 local verification on Python 3.11.9: **468 passed, 12 skipped** without
+external services; **590 passed, 11 skipped** with PostgreSQL 16.15 / PGVector 0.8.6
 and Redis 7.4.11 enabled. The latter skips are SQLite variants of cases requiring
 PostgreSQL locks/checkpoints/vector operations; their PostgreSQL counterparts pass.
 The default suite additionally skips the real Redis check. Ruff lint,
@@ -921,6 +994,15 @@ starting another worker reran only the interrupted reviewer. PR cache reuse avoi
 another file fetch; final HTTP reads returned four findings and score 7.7. No paid
 API calls or GitHub writes occurred. See [worker verification](docs/WORKER.md).
 
+Phase 9 adds formatter, publication lifecycle, revision/author/history checks,
+mock/legacy suppression, safe retries, cancellation/deadlines, lost-response and
+lost-record recovery, and worker publication retries without repeated reviewers.
+Separate local API/worker/CLI processes posted only to a loopback GitHub fixture:
+one comment per review, redelivery/reuse with no extra write, and read-only
+reconciliation after a dropped successful response. A mock review was skipped.
+Alembic `0003`/schema checks, lint/format, and dependency checks passed. Real GitHub
+publishing and paid providers remain unverified; no real GitHub comment was posted.
+
 For a real infrastructure check, start Compose and verify the healthy response.
 Then stop Redis with `docker compose stop redis`: `/health` should return HTTP 503
 with Redis `down`. Start it again with `docker compose start redis` and verify the
@@ -973,25 +1055,30 @@ endpoint recovers. PostgreSQL/PGVector should remain `up` during that check.
    atomic vector snapshots, cosine similarity, bounded injection, and checkpoint reuse.
 8. **Redis processing (implemented):** separate worker, reliable receipts/leases,
    recovery, delayed retries, status API, and temporary revision-scoped PR cache.
-9. **GitHub output:** a single readable Markdown review comment.
-10. **Workflow tests:** webhook-to-review integration with mocked external services.
+9. **GitHub output (implemented):** bounded Markdown comment, opt-in worker/CLI publishing,
+   durable outgoing intent, revision checks, author/body reconciliation, preview/status APIs.
+10. **Workflow tests (implemented):** shared fixtures, HTTP/configuration isolation,
+    signed webhook-to-comment scenarios, service matrix, and a repeatable test runner.
 11. **Polish:** retries, large-PR limits, timings, simulated load script, demo documentation.
 
 ## Limitations and future improvements
 
-Phase 8 processes signed webhook jobs in a separate worker with optional indexed
-context and reconciles Redis outcomes with persisted PostgreSQL results. This is
+The application processes signed webhook jobs with optional indexed context and opt-in
+GitHub output, reconciling Redis outcomes with persisted PostgreSQL results. This is
 at-least-once processing; unfinished model work can repeat after a crash. Worker
 ownership uses a standalone Redis deployment and PostgreSQL session locks, not a
 distributed exactly-once or failover guarantee. Expired Redis display metadata is
 not durable history; completed review reads remain available from PostgreSQL.
+Ambiguous comment writes are reconciled without automatic reposting. A PR can move
+after the final revision check because issue comments have no atomic commit guard.
 Basic input budgets are implemented; chunked review and advanced large-PR handling
 remain future work. Infrastructure
 containers must be verified on a Docker-capable machine. The current credentials
 and configuration target local development. Dependencies use compatible version
 ranges; release deployments should use a pinned dependency resolution.
 
-Future documentation will add GitHub output and benchmark methodology. LLM reviews can produce
+Phase 11 will complete operational polish, benchmark methodology, and demo material.
+LLM reviews can produce
 false positives, retrieval is approximate, diff-only analysis can miss runtime
 behavior, and large PRs require bounded context. Human review and validation of
 generated suggestions remain necessary.

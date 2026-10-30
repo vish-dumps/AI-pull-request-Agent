@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     github_request_timeout_seconds: float = Field(default=15, gt=0, le=120)
     github_max_attempts: int = Field(default=3, ge=1, le=3)
     github_max_file_bytes: int = Field(default=1_000_000, ge=1, le=1_000_000)
+    github_publish_enabled: bool = False
+    github_publish_mock_reviews: bool = False
+    github_publish_max_attempts: int = Field(default=3, ge=1, le=5)
+    github_publish_retry_seconds: float = Field(default=30, ge=1, le=300)
+    github_publish_timeout_seconds: float = Field(default=60, gt=0, le=300)
+    github_comment_max_bytes: int = Field(default=50000, ge=2048, le=60000)
+    github_comment_max_findings: int = Field(default=40, ge=1, le=100)
+    github_comment_max_pages: int = Field(default=10, ge=1, le=100)
     max_webhook_body_bytes: int = Field(default=2_000_000, ge=1, le=25_000_000)
     webhook_enqueue_timeout_seconds: float = Field(default=3, gt=0, le=5)
     review_job_ttl_seconds: int = Field(default=86400, ge=60)

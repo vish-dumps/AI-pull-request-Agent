@@ -23,6 +23,7 @@ def processor(*, locked=True):
         terminal_status=AsyncMock(return_value=None),
         execute=AsyncMock(return_value=ReviewStatus.COMPLETED),
         fail=AsyncMock(return_value=ReviewStatus.FAILED),
+        finalize=AsyncMock(return_value=None),
     )
 
 
@@ -200,3 +201,28 @@ def test_rate_limit_window_schedules_without_sleeping_worker(settings, sample_jo
 def test_extreme_provider_delay_requires_new_delivery_instead_of_early_retry():
     error = GitHubRateLimitError("safe", 429, retry_after_seconds=604801)
     assert failure_reason(error)[1] is False
+
+
+def test_publication_exception_keeps_receipt_without_failing_completed_analysis(
+    settings, sample_job
+):
+    async def run():
+        async with FakeRedis(decode_responses=True) as redis:
+            handler = processor()
+            handler.finalize.side_effect = OSError("publication infrastructure unavailable")
+            queue = WorkerQueue(redis, settings)
+            await ReviewJobQueue(redis, 60).enqueue(sample_job)
+            worker = ReviewWorker(queue, handler, settings)
+            with pytest.raises(OSError):
+                await worker.run_once()
+            handler.fail.assert_not_awaited()
+            token = (await redis.hkeys(PROCESSING))[0]
+            await redis.delete(f"review:{sample_job.review_id}:lease")
+            await redis.zadd(LEASES, {token: 0})
+            handler.terminal_status.return_value = ReviewStatus.COMPLETED
+            handler.finalize.side_effect = None
+            await worker.run_once()
+            assert handler.execute.await_count == 1
+            assert (await queue.status(sample_job.review_id)).status == "COMPLETED"
+
+    asyncio.run(run())

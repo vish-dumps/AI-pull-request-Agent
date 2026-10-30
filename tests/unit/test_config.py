@@ -139,3 +139,19 @@ def test_embedding_key_is_hidden_and_empty_url_is_accepted():
 def test_worker_and_processing_cache_limits_are_bounded(overrides):
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **overrides)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"github_publish_max_attempts": 0},
+        {"github_publish_max_attempts": 6},
+        {"github_comment_max_bytes": 60001},
+        {"github_comment_max_bytes": 2047},
+        {"github_comment_max_pages": 0},
+        {"github_comment_max_findings": 101},
+    ],
+)
+def test_publication_budgets_are_bounded(overrides):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **overrides)

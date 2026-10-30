@@ -1,8 +1,6 @@
 import asyncio
-import hashlib
-import hmac
 import json
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import fakeredis
 import pytest
@@ -14,6 +12,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from app.main import create_app
 from app.schemas.jobs import ReviewJob
 from app.services.job_queue import REVIEW_QUEUE_KEY
+from tests.support.github import webhook_headers as headers
 
 
 @pytest.fixture
@@ -24,16 +23,6 @@ def webhook_client(settings, resources, monkeypatch):
     with fakeredis.FakeRedis(server=server, decode_responses=True) as inspection:
         with TestClient(create_app(settings)) as client:
             yield client, inspection
-
-
-def headers(body, secret="test-webhook-secret", event="pull_request", delivery=None):
-    return {
-        "Content-Type": "application/json",
-        "X-GitHub-Event": event,
-        "X-GitHub-Delivery": str(delivery or uuid4()),
-        "X-Hub-Signature-256": "sha256="
-        + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest(),
-    }
 
 
 @pytest.mark.parametrize("action", ["opened", "synchronize", "reopened"])

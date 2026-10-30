@@ -1,18 +1,66 @@
 import json
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from app.core.config import Settings
-from app.main import create_app
+from app.core.config import Settings, get_settings
 from app.schemas.github import ChangedFile, PullRequestContext
 from app.schemas.jobs import ReviewJob
 from app.schemas.review import FindingInput, ReviewCompletion
+from tests.support.database import database as database
+
+
+def isolate_configuration_and_http(monkeypatch):
+    """Explicit fixtures only: ignore developer config and forbid native HTTP."""
+    fields = {name.casefold() for name in Settings.model_fields}
+    for name in list(os.environ):
+        if name.casefold() in fields or name.startswith(("LANGCHAIN_", "LANGSMITH_")):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    get_settings.cache_clear()
+
+    def blocked(*args, **kwargs):
+        raise AssertionError("Native HTTP is disabled in tests; inject a fixture transport")
+
+    async def blocked_async(*args, **kwargs):
+        blocked()
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", blocked)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", blocked_async)
+
+
+def pytest_configure(config):
+    # Isolate before collection: app.main constructs its ASGI app when imported.
+    patch = pytest.MonkeyPatch()
+    isolate_configuration_and_http(patch)
+    config.add_cleanup(patch.undo)
+
+
+@pytest.fixture(autouse=True)
+def isolated_configuration_and_http(monkeypatch):
+    isolate_configuration_and_http(monkeypatch)
+    yield
+    get_settings.cache_clear()
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        parts = item.path.relative_to(Path(__file__).parent).parts
+        if parts[0] in {"unit", "integration", "e2e"}:
+            item.add_marker(getattr(pytest.mark, parts[0]))
+        parameters = item.callspec.params if hasattr(item, "callspec") else {}
+        if "postgresql" in parameters.values() or "redis" == parameters.get("queue_backend"):
+            item.add_marker(pytest.mark.services)
+        if item.path.name == "test_real_redis_worker_queue.py":
+            item.add_marker(pytest.mark.services)
 
 
 @pytest.fixture
@@ -47,6 +95,8 @@ def resources(monkeypatch):
 
 @pytest.fixture
 def client(settings, resources):
+    from app.main import create_app
+
     with TestClient(create_app(settings)) as test_client:
         yield test_client
 

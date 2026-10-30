@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from contextlib import suppress
+from datetime import UTC, datetime
 from time import perf_counter
 
 from app.core.config import Settings
@@ -12,7 +13,9 @@ from app.core.exceptions import (
     ReviewConflictError,
     WorkflowConflictError,
 )
+from app.schemas.publication import PublicationStatus
 from app.schemas.review import ReviewStatus
+from app.services.publication_service import aware
 from app.services.worker_queue import Receipt, WorkerQueue
 from app.worker.processor import WorkflowProcessor
 
@@ -55,6 +58,28 @@ class ReviewWorker:
             async with asyncio.timeout(self.settings.redis_operation_timeout_seconds):
                 await self.queue.renew(receipt)
 
+    async def _finish(
+        self, receipt: Receipt, terminal: ReviewStatus, *, error: str = "", dead: bool = False
+    ) -> None:
+        if terminal in {ReviewStatus.COMPLETED, ReviewStatus.PARTIAL}:
+            publication = await self.processor.finalize(receipt.job)
+            if publication is not None and publication.status == PublicationStatus.PENDING:
+                delay = (
+                    max(1, (aware(publication.next_retry_at) - datetime.now(UTC)).total_seconds())
+                    if publication.next_retry_at
+                    else 1
+                )
+                await self.queue.defer(
+                    receipt, delay, "Review saved; GitHub publication retry scheduled"
+                )
+                return
+            if publication is not None and publication.status in {
+                PublicationStatus.FAILED,
+                PublicationStatus.UNCERTAIN,
+            }:
+                error = "Review saved; GitHub publication requires attention"
+        await self.queue.finish(receipt, terminal, error=error, dead=dead)
+
     async def _process(self, receipt: Receipt) -> None:
         started = perf_counter()
         async with self.processor.lock(receipt.job) as locked:
@@ -71,7 +96,7 @@ class ReviewWorker:
                 await self.queue.reject(receipt)
                 return
             if terminal is not None:
-                await self.queue.finish(receipt, terminal)
+                await self._finish(receipt, terminal)
                 return
             cached_status = await self.queue.status(receipt.job.review_id)
             if cached_status is not None and cached_status.status in {
@@ -79,16 +104,14 @@ class ReviewWorker:
                 ReviewStatus.PARTIAL,
                 ReviewStatus.FAILED,
             }:
-                await self.queue.finish(
-                    receipt, cached_status.status, error=cached_status.error or ""
-                )
+                await self._finish(receipt, cached_status.status, error=cached_status.error or "")
                 return
             attempts = await self.queue.attempts(receipt)
             if attempts >= self.settings.worker_max_attempts:
                 terminal = await self.processor.fail(
                     receipt.job, "Review worker attempts exhausted"
                 )
-                await self.queue.finish(
+                await self._finish(
                     receipt,
                     terminal,
                     error="Review worker attempts exhausted"
@@ -126,14 +149,14 @@ class ReviewWorker:
                     await self.queue.defer(receipt, delay, message)
                     return
                 terminal = await self.processor.fail(receipt.job, message)
-                await self.queue.finish(
+                await self._finish(
                     receipt,
                     terminal,
                     error=message if terminal == ReviewStatus.FAILED else "",
                     dead=terminal == ReviewStatus.FAILED,
                 )
                 return
-            await self.queue.finish(
+            await self._finish(
                 receipt,
                 terminal,
                 error="All reviewers failed" if terminal == ReviewStatus.FAILED else "",

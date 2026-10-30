@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -22,6 +23,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from app.schemas.publication import PublicationStatus
 from app.schemas.review import AgentType, Recommendation, ReviewStatus, Severity
 
 
@@ -124,6 +126,7 @@ class Review(Base):
     status: Mapped[ReviewStatus] = mapped_column(enum_column(ReviewStatus, "review_status"))
     base_sha: Mapped[str] = mapped_column(String(40))
     head_sha: Mapped[str] = mapped_column(String(40))
+    mock_mode: Mapped[bool | None] = mapped_column(Boolean)
     risk: Mapped[Severity | None] = mapped_column(enum_column(Severity, "risk_level"))
     risk_score: Mapped[float | None] = mapped_column(Float)
     summary: Mapped[str | None] = mapped_column(Text)
@@ -204,3 +207,38 @@ class RepositoryChunk(Base):
     # Variable dimensions permit explicit, isolated embedding profiles without DDL changes.
     # JSON supports storage/migration tests on SQLite; similarity requires PostgreSQL.
     embedding: Mapped[list[float]] = mapped_column(Vector().with_variant(JSON(), "sqlite"))
+
+
+class ReviewPublication(Base):
+    __tablename__ = "review_publications"
+    __table_args__ = (
+        CheckConstraint(
+            "attempts >= 0 AND post_attempts >= 0 AND post_attempts <= attempts",
+            name="attempt_counts",
+        ),
+        CheckConstraint("comment_id IS NULL OR comment_id > 0", name="positive_comment_id"),
+        CheckConstraint(
+            "(status = 'PUBLISHED' AND comment_id IS NOT NULL AND published_at IS NOT NULL) OR "
+            "(status <> 'PUBLISHED' AND comment_id IS NULL AND published_at IS NULL)",
+            name="published_result",
+        ),
+    )
+    review_id: Mapped[UUID] = mapped_column(
+        ForeignKey("reviews.id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[PublicationStatus] = mapped_column(
+        enum_column(PublicationStatus, "publication_status")
+    )
+    body: Mapped[str | None] = mapped_column(Text)
+    destination_hash: Mapped[str] = mapped_column(String(64))
+    author_id: Mapped[int | None] = mapped_column(BigInteger)
+    comment_id: Mapped[int | None] = mapped_column(BigInteger)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    post_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str | None] = mapped_column(String(500))
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

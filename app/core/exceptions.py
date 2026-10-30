@@ -60,3 +60,15 @@ class RepositoryIndexError(Exception):
 
 class LeaseLostError(Exception):
     """A worker no longer owns the queue receipt and must stop processing it."""
+
+
+class PublicationConfigurationError(Exception):
+    """Publication is disabled or lacks explicit GitHub credentials."""
+
+
+class CommentUnavailableError(Exception):
+    """There is no completed/partial review suitable for a comment."""
+
+
+class CommentHistoryIncompleteError(GitHubAPIError):
+    """A bounded scan cannot prove whether a previous comment exists."""

@@ -1,5 +1,5 @@
 import re
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import (
     AfterValidator,
@@ -51,6 +51,19 @@ class GitHubPullRequest(BaseModel):
     additions: int = Field(default=0, ge=0)
     deletions: int = Field(default=0, ge=0)
     changed_files: int = Field(default=0, ge=0)
+    state: Literal["open", "closed"] | None = None
+    merged: bool | None = None
+
+
+class GitHubCommentAuthor(BaseModel):
+    id: int = Field(gt=0, strict=True)
+    login: str = ""
+
+
+class GitHubIssueComment(BaseModel):
+    id: int = Field(gt=0, strict=True)
+    body: str | None = None
+    user: GitHubCommentAuthor | None = None
 
 
 class PullRequestWebhook(BaseModel):

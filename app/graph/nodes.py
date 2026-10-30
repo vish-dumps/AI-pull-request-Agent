@@ -113,7 +113,7 @@ class ReviewNodes:
         }
         if self.sessions is not None:
             async with self.transaction() as store:
-                review = await store.create_review(job, context)
+                review = await store.create_review(job, context, mock_mode=self.mock_mode)
                 if review.status in TERMINAL_STATUSES:
                     changes.update(status=review.status.value, persisted=True, reused=True)
                 else:

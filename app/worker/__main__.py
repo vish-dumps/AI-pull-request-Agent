@@ -15,6 +15,7 @@ from app.services.embedding_service import build_embedding_provider
 from app.services.github_service import GitHubService, build_github_client
 from app.services.llm_service import build_llm_provider
 from app.services.pr_cache import CachedGitHubService
+from app.services.publication_service import ReviewPublisher
 from app.services.worker_queue import WorkerQueue
 from app.worker.processor import WorkflowProcessor
 from app.worker.runner import ReviewWorker
@@ -42,7 +43,13 @@ async def run(settings: Settings, *, once: bool) -> None:
         if settings.retrieval_enabled:
             embeddings = await resources.enter_async_context(build_embedding_provider(settings))
             context = ContextService(sessions, embeddings, settings)
-        processor = WorkflowProcessor(engine, sessions, settings, provider, github, context)
+        publisher = None
+        if settings.github_publish_enabled:
+            publisher = ReviewPublisher(sessions, GitHubService(github_client, settings), settings)
+            publisher.require_configuration()
+        processor = WorkflowProcessor(
+            engine, sessions, settings, provider, github, context, publisher=publisher
+        )
         worker = ReviewWorker(WorkerQueue(redis, settings), processor, settings)
         if once:
             await worker.run_once()
@@ -64,7 +71,7 @@ async def run(settings: Settings, *, once: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Consume queued PR reviews; never publish GitHub comments."
+        description="Consume queued PR reviews; publishing requires explicit GitHub configuration."
     )
     parser.add_argument(
         "--once",

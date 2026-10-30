@@ -3,7 +3,8 @@
 Signed webhooks now have a consumer: a separate worker fetches the queued PR
 revision, runs the four-reviewer graph, persists the review, and acknowledges its
 Redis receipt. The API stays responsive while the worker performs external work.
-GitHub publishing remains Phase 9; workers never call the comment-writing method.
+Phase 9 adds [opt-in publication](PUBLISHING.md) after persistence. The default
+configuration continues to perform no GitHub comment writes.
 
 ```mermaid
 flowchart LR
@@ -13,7 +14,8 @@ flowchart LR
     Lock --> Graph[Start or resume durable graph]
     Cache[Revision-scoped PR cache] --> Graph
     Graph --> DB[(Persist terminal review)]
-    DB --> Ack[Token-checked status and ACK]
+    DB --> Publish[Optional durable publication]
+    Publish --> Ack[Token-checked status and ACK]
     Graph --> Retry[Delayed retry on infrastructure failure]
     Retry --> Pending
     Claim --> Recover[Expired-receipt recovery]
@@ -85,6 +87,12 @@ PROCESSING means an execution attempt began. A delayed retry returns QUEUED with
 its scheduled time. Final states preserve the graph's COMPLETED/PARTIAL/FAILED;
 an agent failure can produce PARTIAL without restarting successful reviewers.
 All agents failing is terminal FAILED, not a new infrastructure retry.
+
+With Phase 9 publishing enabled, a persisted COMPLETED/PARTIAL review can have a
+separately PENDING publication and a QUEUED job waiting for that safe retry. The
+worker does not repeat completed reviewers. Publication failure/uncertainty leaves
+analysis intact; inspect `/reviews/{id}/publication` for its independent outcome.
+See [publishing](PUBLISHING.md) before enabling outbound writes.
 
 Status reads require Redis, not PostgreSQL. Unknown/expired status is 404; Redis
 failure or malformed metadata is a safe 503. Job/status/cache metadata has TTLs.

@@ -83,7 +83,9 @@ class ReviewRepository:
         ):
             raise ReviewConflictError("Review ID already belongs to different inputs")
 
-    async def create_review(self, job: ReviewJob, context: PullRequestContext) -> Review:
+    async def create_review(
+        self, job: ReviewJob, context: PullRequestContext, *, mock_mode: bool | None = None
+    ) -> Review:
         if (
             job.repository.lower() != context.repository.lower()
             or job.pr_number != context.pr_number
@@ -105,6 +107,7 @@ class ReviewRepository:
                     status=ReviewStatus.QUEUED,
                     base_sha=job.base_sha,
                     head_sha=job.head_sha,
+                    mock_mode=mock_mode,
                     created_at=job.created_at,
                 )
                 self.session.add(review)
