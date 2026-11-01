@@ -12,6 +12,10 @@ Install the project locally and run Docker with Linux containers enabled:
 .\.venv\Scripts\python.exe scripts/compose_smoke.py
 ```
 
+Use the locked setup in [COMPLETION.md](COMPLETION.md). Add `--keep` to leave a
+successful fixture stack running for a demonstration. The printed result gives
+the current Swagger URL and exact cleanup command. Failures are still cleaned up.
+
 The first command validates and writes configuration without starting containers.
 The second builds the application Dockerfile and starts PostgreSQL/PGVector,
 Redis, API, worker, and a synthetic GitHub fixture service. Initial image downloads
@@ -36,7 +40,8 @@ Existing containers and external volumes/networks are not reused. Application
 settings and Compose overrides inherited from the shell are cleared before
 rendering `.env.example`; the user's `.env` file is not loaded.
 
-The API and worker use mock models, disable retrieval/tracing, and direct every
+The API and worker use mock models/embeddings, enable repository retrieval, disable
+tracing, and direct every
 GitHub request to the synthetic fixture container. Fixture publication is enabled
 explicitly, including mock-review publication, with a fixture-only token. This
 exercises the real outgoing-comment implementation without touching an actual
@@ -61,11 +66,15 @@ The smoke run verifies:
 8. Redis retains the terminal status and delivery deduplication across restart;
    `alembic check` reports no migration drift and container `pip check` reports no
    incompatible installed dependencies.
+9. The index API fetches three fixture files at the PR's exact base commit;
+   PostgreSQL checkpoints show three real PGVector matches and all four reviewers.
+   Swagger/OpenAPI are served, and `--keep` exposes them for interactive inspection.
 
-The project is stopped and its own disposable containers/network/volumes removed
+By default the project is stopped and its disposable containers/network/volumes removed
 in a `finally` block. Other projects, global Docker caches, and existing Windows
 services are left alone. The built image/cache is retained for subsequent runs.
-No global prune or database flush is performed.
+No global prune or database flush is performed. With `--keep`, run the printed
+cleanup command when finished.
 
 Each run writes ignored evidence under `artifacts/prreview-smoke-<id>/`:
 
@@ -94,12 +103,13 @@ were empty afterward.
 The first attempt found a Windows default-codepage failure when capturing Docker's
 Unicode build output. Log capture now uses explicit UTF-8 files; the corrected
 run completed all checks. Both attempts removed their own disposable resources.
-The host suite additionally passed **489 tests with 12 expected skips**, and Ruff
-lint/format plus compatibility checks passed. Native-service results from Phase 11
-remain recorded separately; the Docker smoke run uses its own actual containers.
+The final locked host suites passed **490 tests with 12 expected skips** on both
+Python 3.11 and 3.12. The full locked service suite passed **615 tests** against
+separate Docker PostgreSQL/PGVector and Redis. Ruff, dependency/lock checks, and
+CI workflow lint passed; see [COMPLETION.md](COMPLETION.md).
 
 This check validates a local Docker deployment. Real GitHub account/token behavior,
 paid-provider responses, production authentication/secrets, TLS ingress, failover,
-release dependency locking, and production capacity remain separate work. The
-container's compatible dependency resolution may differ from the host virtual
-environment; a passing smoke run does not establish exhaustive version coverage.
+and production capacity remain separate work. Dependencies are now locked, Docker
+uses hash-checked exports, and image digests are pinned. A passing smoke run does
+not establish exhaustive platform or semantic-model accuracy coverage.

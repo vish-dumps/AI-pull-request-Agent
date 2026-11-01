@@ -747,5 +747,54 @@ Verified:
   Windows services and other Docker projects were untouched. Build images/cache
   remain available for later runs.
 
-Real account/provider validation, release dependency locking, CI automation, and
-production deployment hardening remain future milestones.
+Real account/provider validation and production deployment hardening remain outside
+the original demonstration scope. Dependency locking and CI are completed below.
+
+## Final completion audit and handoff
+
+Completed on 1 November 2026 after the request to finish the project:
+
+- Audited all twelve final PRD demonstration targets. Added
+  [COMPLETION.md](COMPLETION.md) as the current acceptance checklist and handoff.
+  No additional implementation phase is required to demonstrate the PRD.
+- Added universal `uv.lock` resolution, the locked Hatchling build extra, and
+  `requirements/docker.txt` with exact versions and artifact hashes. Docker uses
+  `pip --require-hashes` followed by a local project build without further resolver
+  or isolated-backend downloads. Python/PostgreSQL/Redis image digests are pinned.
+  `scripts/check_lock.py` detects stale metadata or a mismatched Docker export.
+- Added read-only GitHub CI for Windows/Linux Python 3.11/3.12, a real
+  PostgreSQL/PGVector/Redis suite, and the Docker demo. Actions use full commit
+  SHAs; no provider secrets are required. Docker logs/results are uploaded, and
+  Dependabot covers action/image updates. actionlint 1.7.12 passed locally.
+  The test/demo commands were exercised locally; hosted CI has not been observed.
+- Extended the fixture with commit-pinned tree/content endpoints. The full Docker
+  demonstration now indexes three base-commit files through the real index API,
+  retrieves three actual PGVector chunks, and verifies the saved context and all
+  four reviewer branches through PostgreSQL checkpoints. Swagger/OpenAPI, saved
+  review, score 7.7, one fixture comment, and Redis recovery remain verified.
+- Added interactive `--keep`: a successful run prints live Swagger/review URLs
+  and an exact resource-specific cleanup command. Default and failed runs still
+  clean up automatically. Interactive Swagger HTTP access and manual cleanup were
+  verified. Updated the recorded Docker result with actual indexed/retrieved data.
+- A browser screenshot was attempted using the browser skill, but the browser
+  connection was unavailable. No visual browser success is claimed; the live
+  endpoint checks, actual reports, Markdown previews, and demo commands are present.
+- Updated setup, testing, deployment, demo, and completion documentation to use the
+  locked environment and distinguish PRD completion from production deployment.
+
+Final verification:
+
+- Locked Python 3.11.9: **490 passed, 12 expected skips**.
+- Separate locked Python 3.12.13: **490 passed, 12 expected skips**.
+- Locked Python 3.11 against Docker PostgreSQL 17.11 / PGVector 0.8.7 and Redis:
+  **615 passed, 11 expected SQLite capability skips**.
+- Full PGVector container demo passed on Python 3.11.18 with locked runtime
+  libraries. Both automatic cleanup and interactive retention/cleanup worked.
+- Lock/export checks, Ruff, workflow lint, and compatibility checks for both
+  76-package Windows environments passed. Temporary containers/networks/volumes
+  were removed; existing Windows services and unrelated Docker projects were not
+  changed. Managed Python 3.12 and ignored verification environments are retained.
+
+The project is complete within its PRD scope. Real accounts/providers, hosted CI
+execution after push, and production deployment decisions require their own
+environment; they are not missing local implementation phases.

@@ -1,3 +1,4 @@
+import base64
 from copy import deepcopy
 
 import pytest
@@ -92,3 +93,25 @@ def test_smoke_requires_local_docker_before_starting_resources():
     for endpoint in ("ssh://remote", "tcp://remote:2375", "tcp://127.0.0.1.attacker.invalid:2375"):
         with pytest.raises(ValueError, match="local Docker"):
             require_local_endpoint(endpoint)
+
+
+def test_fixture_indexing_uses_only_base_commit_files():
+    with TestClient(create_fixture_app()) as client:
+        root = "/repos/demo/multi-agent-review"
+        commit = client.get(root + "/commits/" + "a" * 40).json()
+        assert commit["sha"] == "a" * 40
+        tree = client.get(root + "/git/trees/" + commit["commit"]["tree"]["sha"]).json()
+        assert not tree["truncated"] and len(tree["tree"]) == 3
+        for entry in tree["tree"]:
+            content = client.get(
+                root + "/contents/" + entry["path"], params={"ref": "a" * 40}
+            ).json()
+            assert len(base64.b64decode(content["content"])) == entry["size"]
+            assert (
+                client.get(
+                    root + "/contents/" + entry["path"], params={"ref": "c" * 40}
+                ).status_code
+                == 404
+            )
+        assert client.get(root + "/commits/" + "c" * 40).status_code == 404
+        assert client.get("/fixture/stats").json()["content_reads"] == 3

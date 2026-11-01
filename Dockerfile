@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:673719e071ecf27434fd2635bbd8d00f49f4fdd81f243143438a42ced8bedf60
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -6,9 +6,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+COPY requirements/docker.txt /tmp/requirements.txt
+RUN pip install --require-hashes -r /tmp/requirements.txt
+
 COPY pyproject.toml README.md ./
 COPY app ./app
-RUN pip install . \
+RUN pip install --no-deps --no-build-isolation . \
     && useradd --create-home --uid 10001 appuser
 
 COPY scripts ./scripts

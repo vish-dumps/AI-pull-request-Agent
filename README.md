@@ -4,7 +4,7 @@ An automated GitHub pull request reviewer built with FastAPI,
 LangGraph, specialized AI agents, PostgreSQL/PGVector, and Redis. The goal is a small,
 understandable portfolio project with a working demo and defensible engineering choices.
 
-**Current implementation: Phase 11 complete — operational polish and reproducible demos.** Security,
+**PRD implementation complete, with locked dependencies and a full Docker/PGVector demo.** Security,
 Quality, Testing, and Documentation Agents run in parallel between context preparation
 and deterministic aggregation. Failed reviewers preserve successful results as a
 partial review. Optional context retrieval supplies bounded related snippets from
@@ -19,12 +19,17 @@ by default, and mock/unknown legacy reviews are excluded by default.
 The test suite now verifies signed deliveries through final comments with mocked
 HTTP services, plus an opt-in PostgreSQL/PGVector and Redis matrix.
 The original requirements are preserved in [docs/PRD.md](docs/PRD.md).
+The current [completion checklist](docs/COMPLETION.md) maps every final target to
+working evidence. Locked tests pass on Python 3.11/3.12; the service suite passes
+615 tests. GitHub CI is configured and linted; a hosted run is not claimed.
 
 ## Try the free demo
 
-After installing the project (`python -m pip install -e ".[dev]"`):
+Install the reproducible development environment, then generate the free preview:
 
 ```powershell
+python -m pip install uv==0.11.24
+uv sync --locked --extra dev --extra build
 .\.venv\Scripts\python.exe scripts/demo.py
 ```
 
@@ -42,6 +47,9 @@ The follow-on [Docker deployment check](docs/DEPLOYMENT.md) builds and verifies 
 isolated Linux-container stack, including the API, worker, PostgreSQL/PGVector,
 Redis, and fixture-only publishing. Run it with
 `.\.venv\Scripts\python.exe scripts/compose_smoke.py` while Docker is running.
+This now indexes three exact-base files and verifies context retrieved from PGVector.
+Add `--keep` to inspect the live Swagger/review URLs printed by the command; it
+also prints the exact cleanup command. No GitHub account or paid model is used.
 
 ## Features
 
@@ -304,8 +312,8 @@ the host (do not also start the Compose API on the same port):
 ```powershell
 docker compose up -d postgres redis
 Copy-Item .env.example .env
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+python -m pip install uv==0.11.24
+uv sync --locked --extra dev --extra build --python 3.11
 .\.venv\Scripts\python.exe -m alembic upgrade head
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
@@ -964,7 +972,7 @@ executes the actual enqueue script against in-memory Redis. Database health I/O
 is mocked. No GitHub credentials, real external writes, or LLM credits are required.
 These pytest runs do not validate a Docker deployment. The separate
 [Compose smoke check](docs/DEPLOYMENT.md) has now passed against actual Linux
-containers. Its fixture/isolation helpers bring the default suite to **489 passed,
+containers. Its fixture/isolation helpers bring the locked default suite to **490 passed,
 12 expected skips**; real GitHub and paid providers remain unverified.
 
 Phase 3 persistence tests apply the actual Alembic migration to an isolated SQLite
@@ -1137,8 +1145,9 @@ exhaustive chunked review and queue admission/backpressure remain future work.
 Local Linux-container build/startup, migrations, review delivery, fixture publishing,
 and Redis readiness recovery have passed the isolated Compose check. Production
 deployment configuration still requires its own validation. The current credentials
-and configuration target local development. Dependencies use compatible version
-ranges; release deployments should use a pinned dependency resolution.
+and configuration target local development. `uv.lock`, hash-checked Docker
+requirements, and pinned image digests now provide a fixed dependency baseline;
+[COMPLETION.md](docs/COMPLETION.md) documents checks and coordinated updates.
 
 All eleven implementation phases are complete. The measured load results are
 in-process mock simulations, described with their boundaries in

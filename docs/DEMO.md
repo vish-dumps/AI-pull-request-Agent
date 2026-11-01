@@ -44,6 +44,12 @@ Get-Content artifacts/demo/events.jsonl |
 
 ## Stateful delivery demo
 
+The complete container demo now also indexes three exact-base fixture files and
+verifies actual PGVector retrieval. Run `scripts/compose_smoke.py --keep` with Docker
+running to inspect its printed Swagger URL, saved review, and retrieved chunks.
+The printed cleanup command removes only that demo's resources. See
+[COMPLETION.md](COMPLETION.md) for locked setup and the acceptance checklist.
+
 The free artifact demo does not run an HTTP server or exercise Redis ownership.
 For signed acceptance, persistence, actual worker processing, and fixture comment
 publication, run the repeatable end-to-end scenarios:

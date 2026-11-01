@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import shlex
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -68,7 +69,7 @@ def smoke_config(base, project, secret):
                     "EMBEDDING_MOCK_MODE": "true",
                     "EMBEDDING_API_KEY": "",
                     "EMBEDDING_BASE_URL": "",
-                    "RETRIEVAL_ENABLED": "false",
+                    "RETRIEVAL_ENABLED": "true",
                     "LANGSMITH_TRACING": "false",
                     "LANGCHAIN_TRACING_V2": "false",
                 }
@@ -112,6 +113,15 @@ def check_stack(compose):
     api = "http://" + compose("port", "api", "8000").strip()
     fixture = "http://" + compose("port", "fixture", "8081").strip()
     with httpx.Client(timeout=10, trust_env=False) as client:
+        assert client.get(api + "/docs").status_code == 200
+        assert "/webhooks/github" in client.get(api + "/openapi.json").json()["paths"]
+        indexed = client.post(
+            api + "/repositories/index",
+            json={"repository": "demo/multi-agent-review", "ref": "a" * 40},
+        )
+        assert indexed.status_code == 200, indexed.text
+        index = indexed.json()
+        assert index["file_count"] == 3 and index["chunk_count"] >= 3
         healthy = client.get(api + "/health")
         assert healthy.status_code == 200 and all(
             value == "up" for value in healthy.json()["dependencies"].values()
@@ -126,11 +136,11 @@ def check_stack(compose):
             }
         ).encode()
         # The secret is supplied by the caller; no user's application config is read.
-        return api, fixture, body
+        return api, fixture, body, index
 
 
 def exercise(compose, secret):
-    api, fixture, body = check_stack(compose)
+    api, fixture, body, index = check_stack(compose)
     signature = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     headers = {
         "Content-Type": "application/json",
@@ -183,6 +193,30 @@ def exercise(compose, secret):
         assert client.get(fixture + "/fixture/stats").json()["posts"] == 1
         compose("exec", "-T", "api", "alembic", "check")
         compose("exec", "-T", "api", "python", "-m", "pip", "check")
+        checkpoint = json.loads(
+            compose(
+                "exec",
+                "-T",
+                "api",
+                "python",
+                "-c",
+                f'''
+import asyncio, json
+from app.core.config import get_settings
+from app.graph.checkpoints import open_postgres_checkpointer
+async def run():
+    async with open_postgres_checkpointer(get_settings()) as saver:
+        saved = await saver.aget_tuple({{"configurable": {{"thread_id": "{review_id}"}}}})
+        state = saved.checkpoint["channel_values"]
+        print(json.dumps({{"source": state["context_source"], "chunks": state["retrieved_context"],
+                          "agents": sorted(state["agent_results"])}}))
+asyncio.run(run())
+''',
+            )
+        )
+        assert checkpoint["source"] == "pgvector" and checkpoint["chunks"]
+        assert checkpoint["agents"] == ["documentation", "quality", "security", "testing"]
+        assert all(chunk["commit_sha"] == "a" * 40 for chunk in checkpoint["chunks"])
         runtime = json.loads(
             compose(
                 "exec",
@@ -225,6 +259,11 @@ def exercise(compose, secret):
             "postgres_and_vector": postgres,
             "migration_drift": False,
             "dependency_conflicts": False,
+            "index": index,
+            "repository_context": checkpoint,
+            "swagger_checked": True,
+            "api_url": api,
+            "swagger_url": api + "/docs",
         }
 
 
@@ -234,6 +273,11 @@ def main():
         "--prepare-only",
         action="store_true",
         help="Validate/write configuration without starting containers",
+    )
+    parser.add_argument(
+        "--keep",
+        action="store_true",
+        help="Keep a successful fixture stack for Swagger/demo inspection",
     )
     args = parser.parse_args()
     environment = isolated_environment()
@@ -350,8 +394,15 @@ def main():
                 compose("logs", "--no-color"), encoding="utf-8"
             )
         finally:
-            compose("down", "--volumes", "--remove-orphans")
-            report["resources_removed"] = True
+            if args.keep and report["successful"]:
+                cleanup = [*command, "down", "--volumes", "--remove-orphans"]
+                report["cleanup_command"] = (
+                    subprocess.list2cmdline(cleanup) if os.name == "nt" else shlex.join(cleanup)
+                )
+                report["resources_removed"] = False
+            else:
+                compose("down", "--volumes", "--remove-orphans")
+                report["resources_removed"] = True
             (directory / "result.json").write_text(
                 json.dumps(report, indent=2) + "\n", encoding="utf-8"
             )

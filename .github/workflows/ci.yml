@@ -1,0 +1,100 @@
+name: Review agent checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LANGSMITH_TRACING: "false"
+  LANGCHAIN_TRACING_V2: "false"
+  UV_LINK_MODE: copy
+
+jobs:
+  checks:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install uv==0.11.24
+      - run: uv sync --locked --extra dev --extra build --python ${{ matrix.python }}
+      - run: uv run --no-sync python scripts/check_lock.py
+      - run: uv run --no-sync python scripts/test_suite.py
+
+  services:
+    name: PostgreSQL, PGVector, and Redis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg17-bookworm@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+        env:
+          POSTGRES_USER: review_agent
+          POSTGRES_PASSWORD: review_agent
+          POSTGRES_DB: review_agent
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U review_agent -d review_agent"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7.4-alpine@sha256:8da19c7399dca900c6822a1cf30f9d2285585e2c4b457ff4095b0f4500054d3f
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://review_agent:review_agent@127.0.0.1:5432/review_agent
+      TEST_REDIS_URL: redis://127.0.0.1:6379/15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - run: python -m pip install uv==0.11.24
+      - run: uv sync --locked --extra dev --extra build --python 3.11
+      - run: uv run --no-sync python scripts/check_lock.py
+      - run: uv run --no-sync python scripts/test_suite.py --services
+
+  docker-demo:
+    name: Container demo with PGVector context
+    needs: [checks, services]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - run: python -m pip install uv==0.11.24
+      - run: uv sync --locked --extra dev --extra build --python 3.11
+      - run: uv run --no-sync python scripts/check_lock.py
+      - run: uv run --no-sync python scripts/compose_smoke.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: docker-demo-evidence
+          path: artifacts/prreview-smoke-*/
+          if-no-files-found: ignore
+          retention-days: 7

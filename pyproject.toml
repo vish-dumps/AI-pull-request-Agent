@@ -27,6 +27,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+build = ["hatchling>=1.27,<2"]
 dev = [
     "aiosqlite>=0.20,<1",
     "fakeredis[lua]>=2.28,<3",

@@ -4,7 +4,9 @@ Phase 10 consolidates the unit, integration, and end-to-end suites required by
 [PRD section 29](PRD.md#29-testing). Install development dependencies first:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+python -m pip install uv==0.11.24
+uv sync --locked --extra dev --extra build
+.\.venv\Scripts\python.exe scripts/check_lock.py
 .\.venv\Scripts\python.exe scripts/test_suite.py
 ```
 
@@ -113,11 +115,11 @@ repository-context and context-checkpoint integration tests.
 
 ## Recorded verification
 
-Verified on Python 3.11.9:
+Final locked verification (1 November 2026):
 
-- Default runner: **483 passed, 12 skipped**.
-- Service runner with PostgreSQL 16.15 / PGVector 0.8.6 and Redis 7.4.11:
-  **608 passed, 11 skipped**.
+- Default runner on Python 3.11.9 and 3.12.13: **490 passed, 12 skipped** each.
+- Locked service runner with Docker PostgreSQL 17.11 / PGVector 0.8.7 and Redis:
+  **615 passed, 11 skipped**.
 - End-to-end scenarios: 11 without services; 44 across the service matrix.
 - Ruff lint/format checks and installed-dependency compatibility check passed.
 
@@ -125,8 +127,12 @@ Service-enabled skips are SQLite variants of PostgreSQL-only operations. Default
 mode also skips the dedicated real Redis test. These are capability skips, not
 failed scenarios. No coverage percentage, real-provider accuracy, production
 performance, Docker deployment, or CI-platform execution is claimed by these runs.
-The subsequent Docker milestone separately verified the packaged stack and added
-six fixture/isolation tests: the current default suite is **489 passed, 12 skipped**.
+The Docker milestone separately verified the packaged stack, Swagger, indexing,
+and retrieval, and added fixture/isolation tests.
 See [DEPLOYMENT.md](DEPLOYMENT.md) for the actual container result and commands.
 Recorded in-process simulated-load measurements are documented separately in
 [DEMO.md](DEMO.md) and [the benchmark record](../examples/benchmarks/README.md).
+
+CI is configured in `.github/workflows/ci.yml` for Windows/Linux Python 3.11/3.12,
+real service tests, and the Docker demo. Workflow syntax was checked with actionlint;
+commands were exercised locally. Hosted CI execution has not been observed here.
